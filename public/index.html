@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>play-arcade</title>
-  <meta name="description" content="grok bots come with a built-in computer. this one’s public. queue up and use it. a little blockchain experiment. free guest play on an isolated agent computer — never the owner's pc." />
+  <meta name="description" content="grok bots come with a built-in computer. this one’s public. queue up and use it. a little blockchain experiment. free guest play on an isolated agent computer - never the owner's pc." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
@@ -54,7 +54,7 @@
             <div class="screen-head-right mono">
               <span id="np-name">empty</span>
               <span class="sep">·</span>
-              <span id="np-time">—</span>
+              <span id="np-time">-</span>
             </div>
           </div>
           <div class="screen" id="stream-screen" aria-label="agent computer live stream">
@@ -62,11 +62,13 @@
               id="stream-frame"
               class="stream-frame"
               title="agent computer live stream"
-              allow="fullscreen; clipboard-read; clipboard-write"
+              allow="fullscreen; clipboard-read; clipboard-write; pointer-lock"
               referrerpolicy="no-referrer"
+              credentialless
+              sandbox="allow-scripts allow-same-origin allow-pointer-lock allow-forms allow-popups allow-downloads"
             ></iframe>
             <div class="stream-overlay" id="stream-overlay" hidden>
-              <span class="overlay-title" id="stream-overlay-title">stream offline — agent computer not linked</span>
+              <span class="overlay-title" id="stream-overlay-title">stream offline - agent computer not linked</span>
               <span class="overlay-sub mono" id="stream-overlay-sub">waiting for live computer</span>
             </div>
           </div>
@@ -77,7 +79,7 @@
             <span class="sep">·</span>
             <span id="stream-note">watching live computer</span>
           </div>
-          <p class="stream-tip mono" id="stream-tip">stream is the agent computer desk only — never the site owner's pc</p>
+          <p class="stream-tip mono" id="stream-tip">stream uses an isolated blob loader so wallet extensions (phantom, solflare, etc.) do not inject into noVNC. agent computer only, never the owner's pc.</p>
         </div>
 
         <aside class="rail" id="join">
@@ -86,7 +88,7 @@
               <h2>join</h2>
               <span class="meta mono" id="session-pill">10s</span>
             </div>
-            <p class="card-sub">optional display name, then join. fifo by join time. seat drives the agent computer only — never the owner's pc.</p>
+            <p class="card-sub">optional display name, then join. fifo by join time. seat drives the agent computer only - never the owner's pc.</p>
             <label class="field">
               <span class="field-label">display name</span>
               <input type="text" id="display-name" class="text-input mono" maxlength="32" placeholder="guest-xxxx" autocomplete="nickname" />
@@ -98,11 +100,11 @@
               </div>
               <div class="stat">
                 <span class="stat-label">queue pos</span>
-                <span class="stat-value mono" id="you-position">—</span>
+                <span class="stat-value mono" id="you-position">-</span>
               </div>
               <div class="stat">
                 <span class="stat-label">eta</span>
-                <span class="stat-value mono" id="you-eta">—</span>
+                <span class="stat-value mono" id="you-eta">-</span>
               </div>
             </div>
             <button type="button" class="btn btn-primary btn-block" id="btn-join">join</button>
@@ -159,7 +161,7 @@
                 </tr>
               </thead>
               <tbody id="queue-body">
-                <tr class="empty-row"><td colspan="3">queue empty — join to play</td></tr>
+                <tr class="empty-row"><td colspan="3">queue empty - join to play</td></tr>
               </tbody>
             </table>
           </div>
@@ -171,7 +173,7 @@
   <footer class="footer">
     <div class="footer-inner mono">
       <span>play-arcade · guest fifo · free play · agent computer only</span>
-      <span class="dim" id="you-chip">you <span id="you-label">—</span></span>
+      <span class="dim" id="you-chip">you <span id="you-label">-</span></span>
     </div>
   </footer>
 

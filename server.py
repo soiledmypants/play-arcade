@@ -93,7 +93,7 @@ CREW = [
     },
 ]
 
-STREAM_OFFLINE_MSG = "stream offline — agent computer not linked"
+STREAM_OFFLINE_MSG = "stream offline - agent computer not linked"
 
 _CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 _NAME_RE = re.compile(r"^[A-Za-z0-9 _.\-]{1,32}$")
@@ -409,7 +409,7 @@ def join_queue(client_id: str, name: Any = None) -> dict[str, Any]:
             return {
                 "ok": True,
                 "status": "playing",
-                "message": "joined — you have the seat",
+                "message": "joined - you have the seat",
                 "name": display,
                 "state": public_state_unlocked(),
             }

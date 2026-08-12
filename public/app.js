@@ -59,6 +59,11 @@ let busy = false;
 let streamMode = null;
 let streamOnline = null;
 let streamCheckBusy = false;
+let streamBlobUrl = null;
+let streamLoadToken = 0;
+
+const STREAM_TIP =
+  "stream uses an isolated blob loader so wallet extensions (phantom, solflare, etc.) do not inject into noVNC. agent computer only, never the owner's pc.";
 
 function randomId() {
   const bytes = new Uint8Array(16);
@@ -112,8 +117,8 @@ function setStatus(msg, kind = "") {
 }
 
 function formatEta(seconds) {
-  if (sessionIsUnlimited()) return "—";
-  if (seconds == null || !Number.isFinite(Number(seconds))) return "—";
+  if (sessionIsUnlimited()) return "-";
+  if (seconds == null || !Number.isFinite(Number(seconds))) return "-";
   const s = Math.max(0, Math.floor(Number(seconds) || 0));
   if (s === 0) return "~now";
   if (s < 60) return `~${s}s`;
@@ -145,7 +150,7 @@ function sessionPillText() {
 }
 
 function offlineMessage() {
-  return config.stream?.offlineMessage || "stream offline — agent computer not linked";
+  return config.stream?.offlineMessage || "stream offline - agent computer not linked";
 }
 
 function renderCrew(crew) {
@@ -179,6 +184,9 @@ function applyConfig(cfg) {
   }
   if (els.streamNote && config.stream?.note) {
     els.streamNote.title = config.stream.note;
+  }
+  if (els.streamTip) {
+    els.streamTip.textContent = STREAM_TIP;
   }
   if (Array.isArray(config.crew)) renderCrew(config.crew);
   refreshYouUi();
@@ -229,8 +237,8 @@ function refreshYouUi() {
     els.btnJoin.textContent = "already in queue";
   } else {
     els.youStatus.textContent = "ready";
-    els.youPosition.textContent = "—";
-    els.youEta.textContent = "—";
+    els.youPosition.textContent = "-";
+    els.youEta.textContent = "-";
     els.btnLeave.hidden = true;
     els.btnJoin.disabled = busy;
     els.btnJoin.textContent = "join";
@@ -238,20 +246,135 @@ function refreshYouUi() {
   syncStreamFrame();
 }
 
-function streamUrls() {
-  const s = config.stream || {};
-  let view =
-    s.viewPath ||
-    s.viewUrl ||
-    "/stream/vnc.html?autoconnect=1&resize=scale&view_only=1&path=stream/";
-  let control =
-    s.controlPath ||
-    s.controlUrl ||
-    "/stream/vnc.html?autoconnect=1&resize=scale&path=stream/";
-  // relative paths from config.stream must hit the agent backend, not Netlify
-  view = absolutizePath(view);
-  control = absolutizePath(control);
-  return { view, control };
+function streamApiOrigin() {
+  try {
+    return new URL(API_BASE || window.location.origin);
+  } catch {
+    return new URL(window.location.origin);
+  }
+}
+
+function streamAssetBase() {
+  return `${streamApiOrigin().origin}/stream`;
+}
+
+function revokeStreamBlob() {
+  if (streamBlobUrl) {
+    URL.revokeObjectURL(streamBlobUrl);
+    streamBlobUrl = null;
+  }
+}
+
+function buildStreamParams(mode) {
+  const origin = streamApiOrigin();
+  const isHttps = origin.protocol === "https:";
+  const port = origin.port || (isHttps ? "443" : "80");
+  const params = new URLSearchParams();
+  params.set("autoconnect", "1");
+  params.set("reconnect", "1");
+  params.set("resize", "scale");
+  params.set("host", origin.hostname);
+  params.set("port", String(port));
+  params.set("path", "stream/");
+  params.set("encrypt", isHttps ? "1" : "0");
+  if (mode === "view") params.set("view_only", "1");
+  return params;
+}
+
+/** Rewrite relative noVNC asset URLs so a blob: document can load them from the API. */
+function absolutizeStreamHtml(html, assetBase) {
+  const base = assetBase.replace(/\/$/, "");
+  html = html.replace(
+    /\b(src|href)="(?!https?:\/\/|data:|blob:|\/\/|#)([^"]+)"/gi,
+    (_m, attr, url) => {
+      if (url.startsWith("/")) {
+        return `${attr}="${streamApiOrigin().origin}${url}"`;
+      }
+      const cleaned = url.replace(/^\.\//, "");
+      return `${attr}="${base}/${cleaned}"`;
+    }
+  );
+  // Inline module imports: from "./app/ui.js" / from './core/...'
+  html = html.replace(
+    /(\bfrom\s*)(["'])\.\/([^"']+)\2/g,
+    (_m, pref, q, rel) => `${pref}${q}${base}/${rel}${q}`
+  );
+  // fetch('./defaults.json') used by vnc.html bootstrap
+  html = html.replace(
+    /(fetch\s*\(\s*)(["'])\.\/([^"']+)\2/g,
+    (_m, pref, q, rel) => `${pref}${q}${base}/${rel}${q}`
+  );
+  return html;
+}
+
+/** Force host/port/path/encrypt inside the fetched HTML (blob pages lose query params). */
+function injectStreamConnectSettings(html, mode) {
+  const origin = streamApiOrigin();
+  const isHttps = origin.protocol === "https:";
+  const port = origin.port || (isHttps ? "443" : "80");
+  const viewOnly = mode === "view";
+  const base = streamAssetBase().replace(/\/$/, "") + "/";
+  const boot = `
+    <base href="${base}">
+    <script>
+      // Play-site blob loader: wallet extensions skip blob: documents.
+      // noVNC reads connect settings from defaults/mandatory (query is unavailable on blob:).
+      window.PLAY_STREAM_WS = ${JSON.stringify(
+        `${isHttps ? "wss" : "ws"}://${origin.hostname}:${port}/stream/`
+      )};
+    </script>
+`;
+  if (/<head[^>]*>/i.test(html)) {
+    html = html.replace(/<head[^>]*>/i, (m) => m + boot);
+  } else {
+    html = boot + html;
+  }
+  const inject = `
+        defaults['host'] = ${JSON.stringify(origin.hostname)};
+        defaults['port'] = ${JSON.stringify(String(port))};
+        defaults['path'] = 'stream/';
+        defaults['encrypt'] = ${isHttps ? "true" : "false"};
+        defaults['autoconnect'] = true;
+        defaults['reconnect'] = true;
+        defaults['resize'] = 'scale';
+        defaults['view_only'] = ${viewOnly ? "true" : "false"};
+        mandatory['host'] = defaults['host'];
+        mandatory['port'] = defaults['port'];
+        mandatory['path'] = defaults['path'];
+        mandatory['encrypt'] = defaults['encrypt'];
+        mandatory['view_only'] = defaults['view_only'];
+`;
+  if (html.includes("UI.start(")) {
+    html = html.replace("UI.start(", `${inject}\n        UI.start(`);
+  }
+  return html;
+}
+
+async function loadStreamFrame(mode) {
+  if (!els.streamFrame) return;
+  const token = ++streamLoadToken;
+  const params = buildStreamParams(mode);
+  const fetchUrl = apiUrl(`/stream/vnc.html?${params.toString()}`);
+  const assetBase = streamAssetBase();
+  try {
+    const res = await fetch(fetchUrl, { cache: "no-store" });
+    if (!res.ok) throw new Error(`stream html ${res.status}`);
+    let html = await res.text();
+    html = absolutizeStreamHtml(html, assetBase);
+    html = injectStreamConnectSettings(html, mode);
+    if (token !== streamLoadToken) return;
+    const blob = new Blob([html], { type: "text/html" });
+    const blobUrl = URL.createObjectURL(blob);
+    // Hash params: noVNC also reads connect settings from location.hash
+    const nextSrc = `${blobUrl}#${params.toString()}`;
+    revokeStreamBlob();
+    streamBlobUrl = blobUrl;
+    streamMode = mode;
+    els.streamFrame.setAttribute("src", nextSrc);
+  } catch {
+    if (token !== streamLoadToken) return;
+    showStreamOffline(offlineMessage());
+  }
 }
 
 function desiredStreamMode(state) {
@@ -262,6 +385,8 @@ function desiredStreamMode(state) {
 
 function showStreamOffline(msg) {
   streamOnline = false;
+  streamMode = null;
+  revokeStreamBlob();
   if (els.streamOverlay) {
     els.streamOverlay.hidden = false;
     if (els.streamOverlayTitle) {
@@ -319,13 +444,9 @@ function syncStreamFrame(force = false) {
     return;
   }
   const mode = desiredStreamMode(lastState);
-  const { view, control } = streamUrls();
-  const nextSrc = mode === "control" ? control : view;
   if (force || streamMode !== mode) {
     streamMode = mode;
-    if (els.streamFrame.getAttribute("src") !== nextSrc) {
-      els.streamFrame.setAttribute("src", nextSrc);
-    }
+    loadStreamFrame(mode);
   }
   if (els.streamBadge) {
     const controlling = mode === "control";
@@ -335,7 +456,7 @@ function syncStreamFrame(force = false) {
   if (els.streamNote) {
     els.streamNote.textContent =
       mode === "control"
-        ? "you are driving the agent computer — click the screen"
+        ? "you are driving the agent computer - click the screen"
         : "watching live computer";
   }
 }
@@ -360,7 +481,7 @@ function renderState(state) {
     els.npStatus.textContent = "idle";
     els.liveDot?.classList.remove("on");
     els.npName.textContent = "empty";
-    els.npTime.textContent = "—";
+    els.npTime.textContent = "-";
   }
   syncStreamFrame();
 
@@ -368,7 +489,7 @@ function renderState(state) {
   els.queueCount.textContent = `${queue.length} waiting`;
   if (!queue.length) {
     els.queueBody.innerHTML =
-      '<tr class="empty-row"><td colspan="3">queue empty — join to play</td></tr>';
+      '<tr class="empty-row"><td colspan="3">queue empty - join to play</td></tr>';
   } else {
     els.queueBody.innerHTML = queue
       .map(
