@@ -4,9 +4,9 @@ short instructions for players and operators.
 
 ## players
 
-1. enter an optional display name (default `guest-xxxx`)
-2. click **join** — fifo queue by join time
-3. wait your turn
+1. connect phantom (`window.solana`) - required for seat identity
+2. optional display name (default `guest-xxxx` from wallet suffix)
+3. click **join** - queue ranks by token holdings, ties by join time
 4. when **now playing**, you control the **agent computer** (live computer) for `sessionSeconds` (live default **15s**; testing may use `0` = no limit)
 5. everyone else watches the same live computer stream
 
@@ -32,7 +32,8 @@ python3 server.py                    # :8787, proxies /stream/
 
 - frontend can be public
 - stream gateway stays on the agent host (loopback vnc/novnc + authenticated edge)
-- control only for the now-playing ticket; view_only for everyone else
+- control only when connected wallet matches nowPlaying.wallet; view_only for everyone else
+- blob stream loader keeps wallet extensions out of the noVNC iframe
 
 isolation details: [SECURITY.md](./SECURITY.md)
 

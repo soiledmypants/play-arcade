@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Free-play arcade — guest FIFO queue + agent-computer stream. Stdlib HTTP API + static frontend."""
+"""Free-play arcade - wallet holdings queue + agent-computer stream. Stdlib HTTP API + static frontend."""
 
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ import select
 import socket
 import threading
 import time
+import urllib.error
+import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -57,6 +59,20 @@ else:
 
 SESSION_UNLIMITED = SESSION_SECONDS <= 0
 
+DEMO_MODE = (os.environ.get("DEMO_MODE") or "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+TOKEN_MINT = (
+    os.environ.get("TOKEN_MINT")
+    or "8j3VdEjQW1Wch6nQHueVu9A1DeihKXiq3qS6eSPWpump"
+).strip()
+SOLANA_RPC_URL = (
+    os.environ.get("SOLANA_RPC_URL") or "https://api.mainnet-beta.solana.com"
+).strip()
+
 # Localhost-only noVNC/websockify upstream (never bind VNC/noVNC to 0.0.0.0 here).
 STREAM_UPSTREAM = os.environ.get("STREAM_UPSTREAM", "127.0.0.1:6088")
 _stream_host, _stream_port_s = STREAM_UPSTREAM.rsplit(":", 1)
@@ -95,7 +111,8 @@ CREW = [
 
 STREAM_OFFLINE_MSG = "stream offline - agent computer not linked"
 
-_CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+# Solana base58 pubkey (loose; Phantom addresses are typically 32-44 chars).
+_WALLET_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 _NAME_RE = re.compile(r"^[A-Za-z0-9 _.\-]{1,32}$")
 
 # ---------------------------------------------------------------------------
@@ -114,27 +131,82 @@ def _default_state() -> dict[str, Any]:
     return {"nowPlaying": None, "queue": [], "updatedAt": int(time.time())}
 
 
-def sanitize_name(name: Any, client_id: str) -> str:
+def sanitize_name(name: Any, wallet: str) -> str:
     raw = (str(name) if name is not None else "").strip()
     if not raw:
-        suffix = client_id[-4:] if len(client_id) >= 4 else client_id
+        suffix = wallet[-4:] if len(wallet) >= 4 else wallet
         return f"guest-{suffix}"
     raw = re.sub(r"\s+", " ", raw)
     if not _NAME_RE.match(raw):
-        # strip illegal chars rather than reject soft guest names
         cleaned = re.sub(r"[^A-Za-z0-9 _.\-]", "", raw).strip()
         if not cleaned:
-            suffix = client_id[-4:] if len(client_id) >= 4 else client_id
+            suffix = wallet[-4:] if len(wallet) >= 4 else wallet
             return f"guest-{suffix}"
         raw = cleaned[:32]
     return raw[:32]
 
 
-def validate_client_id(client_id: str) -> str:
-    client_id = (client_id or "").strip()
-    if not _CLIENT_ID_RE.match(client_id):
-        raise ValueError("clientId required (8-64 chars, alnum/_/-)")
-    return client_id
+def validate_wallet(wallet: str) -> str:
+    wallet = (wallet or "").strip()
+    if not _WALLET_RE.match(wallet):
+        raise ValueError("wallet required (base58 solana address)")
+    return wallet
+
+
+def short_wallet(wallet: str) -> str:
+    if len(wallet) <= 10:
+        return wallet
+    return f"{wallet[:4]}…{wallet[-4:]}"
+
+
+def rpc_token_holdings(wallet: str) -> float:
+    """Read SPL token uiAmount for TOKEN_MINT owned by wallet. 0 on miss/error."""
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getTokenAccountsByOwner",
+        "params": [
+            wallet,
+            {"mint": TOKEN_MINT},
+            {"encoding": "jsonParsed"},
+        ],
+    }
+    req = urllib.request.Request(
+        SOLANA_RPC_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+        return 0.0
+    if data.get("error"):
+        return 0.0
+    value = ((data.get("result") or {}).get("value")) or []
+    total = 0.0
+    for acct in value:
+        try:
+            info = acct["account"]["data"]["parsed"]["info"]["tokenAmount"]
+            ui = info.get("uiAmount")
+            if ui is None:
+                amount = float(info.get("amount") or 0)
+                decimals = int(info.get("decimals") or 0)
+                ui = amount / (10**decimals) if decimals >= 0 else amount
+            total += float(ui or 0)
+        except (KeyError, TypeError, ValueError):
+            continue
+    return max(0.0, total)
+
+
+def resolve_holdings(wallet: str, demo_holdings: Any = None) -> float:
+    if DEMO_MODE and demo_holdings is not None:
+        try:
+            return max(0.0, float(demo_holdings))
+        except (TypeError, ValueError) as e:
+            raise ValueError("holdings must be a number") from e
+    return rpc_token_holdings(wallet)
 
 
 def load_state() -> None:
@@ -145,7 +217,7 @@ def load_state() -> None:
             data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 np = data.get("nowPlaying")
-                if isinstance(np, dict) and np.get("clientId"):
+                if isinstance(np, dict) and np.get("wallet"):
                     seconds = int(
                         np.get("seconds")
                         or np.get("sessionSeconds")
@@ -155,10 +227,11 @@ def load_state() -> None:
                             else SESSION_SECONDS
                         )
                     )
-                    cid = str(np["clientId"])
+                    wallet = str(np["wallet"])
                     np = {
-                        "clientId": cid,
-                        "name": sanitize_name(np.get("name"), cid),
+                        "wallet": wallet,
+                        "name": sanitize_name(np.get("name"), wallet),
+                        "holdings": float(np.get("holdings") or 0),
                         "seconds": seconds,
                         "startedAt": float(np.get("startedAt") or 0),
                         "endsAt": float(np.get("endsAt") or 0),
@@ -168,17 +241,18 @@ def load_state() -> None:
                         "joinedAt": np.get("joinedAt"),
                     }
                 else:
-                    # Drop legacy wallet-based seats
+                    # Drop legacy guest/clientId seats
                     np = None
                 queue = []
                 for q in data.get("queue") or []:
-                    if not isinstance(q, dict) or not q.get("clientId"):
+                    if not isinstance(q, dict) or not q.get("wallet"):
                         continue
-                    cid = str(q["clientId"])
+                    wallet = str(q["wallet"])
                     queue.append(
                         {
-                            "clientId": cid,
-                            "name": sanitize_name(q.get("name"), cid),
+                            "wallet": wallet,
+                            "name": sanitize_name(q.get("name"), wallet),
+                            "holdings": float(q.get("holdings") or 0),
                             "joinedAt": float(q.get("joinedAt") or time.time()),
                             "seconds": SESSION_SECONDS,
                         }
@@ -208,17 +282,19 @@ def save_state() -> None:
 
 
 def sort_queue() -> None:
-    """FIFO by join time."""
-    _state["queue"].sort(key=lambda q: float(q.get("joinedAt") or 0))
+    """Holdings desc, then earlier join time wins ties."""
+    _state["queue"].sort(
+        key=lambda q: (-float(q.get("holdings") or 0), float(q.get("joinedAt") or 0))
+    )
 
 
-def client_in_play(client_id: str) -> str | None:
+def wallet_in_play(wallet: str) -> str | None:
     """Return 'playing' | 'queued' | None."""
     np = _state.get("nowPlaying")
-    if np and np.get("clientId") == client_id:
+    if np and np.get("wallet") == wallet:
         return "playing"
     for q in _state["queue"]:
-        if q.get("clientId") == client_id:
+        if q.get("wallet") == wallet:
             return "queued"
     return None
 
@@ -254,8 +330,9 @@ def tick_sessions() -> None:
         unlimited = SESSION_UNLIMITED or seconds == 0
         ends = 0 if unlimited else (now + seconds)
         _state["nowPlaying"] = {
-            "clientId": nxt["clientId"],
-            "name": nxt.get("name") or sanitize_name(None, nxt["clientId"]),
+            "wallet": nxt["wallet"],
+            "name": nxt.get("name") or sanitize_name(None, nxt["wallet"]),
+            "holdings": float(nxt.get("holdings") or 0),
             "seconds": seconds,
             "startedAt": now,
             "endsAt": ends,
@@ -271,8 +348,10 @@ def public_config() -> dict[str, Any]:
     return {
         "sessionSeconds": SESSION_SECONDS,
         "sessionUnlimited": SESSION_UNLIMITED,
-        "queueMode": "fifo",
-        "identityMode": "guest",
+        "queueMode": "holdings",
+        "identityMode": "wallet",
+        "demoMode": DEMO_MODE,
+        "tokenMint": TOKEN_MINT,
         "port": PORT,
         "crew": CREW,
         "stream": {
@@ -306,11 +385,14 @@ def _build_public_queue(np: dict[str, Any] | None) -> list[dict[str, Any]]:
             if np:
                 rem = max(0, int(np.get("remainingSeconds") or 0))
                 eta_seconds = rem + i * session
+        wallet = q["wallet"]
         queue.append(
             {
                 "position": i + 1,
-                "clientId": q["clientId"],
-                "name": q.get("name") or sanitize_name(None, q["clientId"]),
+                "wallet": wallet,
+                "walletShort": short_wallet(wallet),
+                "name": q.get("name") or sanitize_name(None, wallet),
+                "holdings": float(q.get("holdings") or 0),
                 "seconds": session,
                 "joinedAt": q.get("joinedAt"),
                 "etaSeconds": eta_seconds,
@@ -324,9 +406,12 @@ def public_state_unlocked() -> dict[str, Any]:
     np = _state["nowPlaying"]
     np_out = None
     if np:
+        wallet = np["wallet"]
         np_out = {
-            "clientId": np["clientId"],
-            "name": np.get("name") or sanitize_name(None, np["clientId"]),
+            "wallet": wallet,
+            "walletShort": short_wallet(wallet),
+            "name": np.get("name") or sanitize_name(None, wallet),
+            "holdings": float(np.get("holdings") or 0),
             "seconds": np.get("seconds"),
             "startedAt": np.get("startedAt"),
             "endsAt": np.get("endsAt"),
@@ -351,36 +436,43 @@ def public_state() -> dict[str, Any]:
         return public_state_unlocked()
 
 
-def join_queue(client_id: str, name: Any = None) -> dict[str, Any]:
-    client_id = validate_client_id(client_id)
-    display = sanitize_name(name, client_id)
+def join_queue(
+    wallet: str, name: Any = None, demo_holdings: Any = None
+) -> dict[str, Any]:
+    wallet = validate_wallet(wallet)
+    display = sanitize_name(name, wallet)
+    holdings = resolve_holdings(wallet, demo_holdings)
 
     with _lock:
         tick_sessions()
-        status = client_in_play(client_id)
+        status = wallet_in_play(wallet)
         if status == "playing":
             np = _state.get("nowPlaying")
-            if np and np.get("clientId") == client_id:
+            if np and np.get("wallet") == wallet:
                 np["name"] = display
+                np["holdings"] = holdings
             save_state()
             return {
                 "ok": True,
                 "status": "playing",
                 "message": "already now playing",
+                "wallet": wallet,
                 "name": display,
+                "holdings": holdings,
                 "state": public_state_unlocked(),
             }
         if status == "queued":
             for q in _state["queue"]:
-                if q["clientId"] == client_id:
+                if q["wallet"] == wallet:
                     q["name"] = display
+                    q["holdings"] = holdings
                     break
             sort_queue()
             pos = next(
                 (
                     i + 1
                     for i, q in enumerate(_state["queue"])
-                    if q["clientId"] == client_id
+                    if q["wallet"] == wallet
                 ),
                 None,
             )
@@ -390,13 +482,16 @@ def join_queue(client_id: str, name: Any = None) -> dict[str, Any]:
                 "status": "queued",
                 "position": pos,
                 "message": "already in queue",
+                "wallet": wallet,
                 "name": display,
+                "holdings": holdings,
                 "state": public_state_unlocked(),
             }
 
         entry = {
-            "clientId": client_id,
+            "wallet": wallet,
             "name": display,
+            "holdings": holdings,
             "joinedAt": time.time(),
             "seconds": SESSION_SECONDS,
         }
@@ -405,19 +500,21 @@ def join_queue(client_id: str, name: Any = None) -> dict[str, Any]:
         tick_sessions()
         save_state()
         np = _state.get("nowPlaying")
-        if np and np.get("clientId") == client_id:
+        if np and np.get("wallet") == wallet:
             return {
                 "ok": True,
                 "status": "playing",
                 "message": "joined - you have the seat",
+                "wallet": wallet,
                 "name": display,
+                "holdings": holdings,
                 "state": public_state_unlocked(),
             }
         pos = next(
             (
                 i + 1
                 for i, q in enumerate(_state["queue"])
-                if q["clientId"] == client_id
+                if q["wallet"] == wallet
             ),
             None,
         )
@@ -426,18 +523,20 @@ def join_queue(client_id: str, name: Any = None) -> dict[str, Any]:
             "status": "queued",
             "position": pos,
             "message": "joined the queue",
+            "wallet": wallet,
             "name": display,
+            "holdings": holdings,
             "state": public_state_unlocked(),
         }
 
 
-def leave_queue(client_id: str) -> dict[str, Any]:
-    client_id = validate_client_id(client_id)
+def leave_queue(wallet: str) -> dict[str, Any]:
+    wallet = validate_wallet(wallet)
 
     with _lock:
         tick_sessions()
         np = _state.get("nowPlaying")
-        if np and np.get("clientId") == client_id:
+        if np and np.get("wallet") == wallet:
             _state["nowPlaying"] = None
             tick_sessions()
             save_state()
@@ -449,9 +548,7 @@ def leave_queue(client_id: str) -> dict[str, Any]:
             }
 
         before = len(_state["queue"])
-        _state["queue"] = [
-            q for q in _state["queue"] if q.get("clientId") != client_id
-        ]
+        _state["queue"] = [q for q in _state["queue"] if q.get("wallet") != wallet]
         removed = before != len(_state["queue"])
         sort_queue()
         tick_sessions()
@@ -700,10 +797,11 @@ class Handler(SimpleHTTPRequestHandler):
             return
 
         if path == "/api/queue/join":
-            client_id = (body.get("clientId") or "").strip()
+            wallet = (body.get("wallet") or "").strip()
             name = body.get("name")
+            demo_holdings = body.get("holdings") if DEMO_MODE else None
             try:
-                result = join_queue(client_id, name=name)
+                result = join_queue(wallet, name=name, demo_holdings=demo_holdings)
             except ValueError as e:
                 self._json(400, {"error": str(e)})
                 return
@@ -711,9 +809,9 @@ class Handler(SimpleHTTPRequestHandler):
             return
 
         if path == "/api/queue/leave":
-            client_id = (body.get("clientId") or "").strip()
+            wallet = (body.get("wallet") or "").strip()
             try:
-                result = leave_queue(client_id)
+                result = leave_queue(wallet)
             except ValueError as e:
                 self._json(400, {"error": str(e)})
                 return
@@ -734,8 +832,10 @@ def main() -> None:
     print(f"play-site listening on http://0.0.0.0:{PORT}")
     print(
         f"  SESSION_SECONDS={cfg['sessionSeconds']}  "
-        f"queueMode={cfg['queueMode']}  identityMode={cfg['identityMode']}"
+        f"queueMode={cfg['queueMode']}  identityMode={cfg['identityMode']}  "
+        f"demoMode={cfg['demoMode']}"
     )
+    print(f"  TOKEN_MINT={TOKEN_MINT}")
     print(f"  stream proxy {STREAM_PREFIX}/ -> {STREAM_UPSTREAM} (loopback only)")
     print(f"  static={PUBLIC}")
     try:

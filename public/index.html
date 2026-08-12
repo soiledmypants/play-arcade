@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>play-arcade</title>
-  <meta name="description" content="grok bots come with a built-in computer. this one’s public. queue up and use it. a little blockchain experiment. free guest play on an isolated agent computer - never the owner's pc." />
+  <meta name="description" content="grok bots come with a built-in computer. this one's public. queue up and use it. a little blockchain experiment. free guest play on an isolated agent computer - never the owner's pc." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
@@ -19,9 +19,12 @@
         <span class="brand-mark">▣</span>
         <span class="brand-name">play-arcade</span>
       </a>
+      <p class="topbar-bio">
+        grok bots come with a built-in computer. this one's public. queue up and use it. a little blockchain experiment.
+      </p>
       <nav class="nav">
-        <a href="#join">join</a>
         <a href="#live">live</a>
+        <a href="#join">join</a>
         <a href="#queue">queue</a>
         <a href="https://x.com/botcomputerxai" target="_blank" rel="noopener noreferrer">twitter</a>
       </nav>
@@ -29,21 +32,8 @@
   </header>
 
   <main id="top">
-    <section class="intro">
-      <div class="intro-inner">
-        <p class="intro-line">
-          grok bots come with a built-in computer. this one’s public. queue up and use it. a little blockchain experiment.
-        </p>
-        <p class="intro-line intro-sub">
-          two-agent crew · <em>live computer</em> is the isolated <strong>agent computer</strong> (not your device, not the site owner's pc) ·
-          <em>twitter</em> posts · enter a display name · fifo queue ·
-          <span id="session-label">10s sessions</span> · free to play
-        </p>
-      </div>
-    </section>
-
-    <section class="desk" id="live">
-      <div class="desk-inner">
+    <section class="stream-stage" id="live">
+      <div class="stream-sticky" id="stream-sticky">
         <div class="screen-panel">
           <div class="screen-head">
             <div class="screen-head-left">
@@ -53,6 +43,8 @@
             </div>
             <div class="screen-head-right mono">
               <span id="np-name">empty</span>
+              <span class="sep">·</span>
+              <span id="np-holdings">-</span>
               <span class="sep">·</span>
               <span id="np-time">-</span>
             </div>
@@ -75,74 +67,53 @@
           <div class="screen-meta mono">
             <span id="np-status">idle</span>
             <span class="sep">·</span>
-            <span id="mode-label">guest fifo</span>
+            <span id="mode-label">holdings queue</span>
             <span class="sep">·</span>
             <span id="stream-note">watching live computer</span>
+            <span class="sep">·</span>
+            <span id="session-label">15s sessions</span>
           </div>
-          <p class="stream-tip mono" id="stream-tip">stream uses an isolated blob loader so wallet extensions (phantom, solflare, etc.) do not inject into noVNC. agent computer only, never the owner's pc.</p>
         </div>
-
-        <aside class="rail" id="join">
-          <div class="card">
-            <div class="card-head">
-              <h2>join</h2>
-              <span class="meta mono" id="session-pill">10s</span>
-            </div>
-            <p class="card-sub">optional display name, then join. fifo by join time. seat drives the agent computer only - never the owner's pc.</p>
-            <label class="field">
-              <span class="field-label">display name</span>
-              <input type="text" id="display-name" class="text-input mono" maxlength="32" placeholder="guest-xxxx" autocomplete="nickname" />
-            </label>
-            <div class="stat-stack">
-              <div class="stat">
-                <span class="stat-label">status</span>
-                <span class="stat-value mono" id="you-status">ready</span>
-              </div>
-              <div class="stat">
-                <span class="stat-label">queue pos</span>
-                <span class="stat-value mono" id="you-position">-</span>
-              </div>
-              <div class="stat">
-                <span class="stat-label">eta</span>
-                <span class="stat-value mono" id="you-eta">-</span>
-              </div>
-            </div>
-            <button type="button" class="btn btn-primary btn-block" id="btn-join">join</button>
-            <button type="button" class="btn btn-ghost btn-block" id="btn-leave" hidden>leave</button>
-            <p class="status-line mono" id="join-status" role="status"></p>
-          </div>
-
-          <div class="card crew-card">
-            <div class="card-head">
-              <h2>crew</h2>
-            </div>
-            <ul class="crew-list" id="crew-list">
-              <li>
-                <span class="crew-name">live computer</span>
-                <span class="crew-role">agent computer desk / stream</span>
-              </li>
-              <li>
-                <a class="crew-name" href="https://x.com/botcomputerxai" target="_blank" rel="noopener noreferrer">twitter</a>
-                <span class="crew-role">@botcomputerxai</span>
-              </li>
-            </ul>
-          </div>
-        </aside>
       </div>
     </section>
 
-    <section class="lower">
-      <div class="lower-inner">
-        <div class="card" id="twitter">
+    <section class="ops" id="join">
+      <div class="ops-inner">
+        <div class="card join-card">
           <div class="card-head">
-            <h2>twitter</h2>
-            <span class="meta mono">agent</span>
+            <h2>join</h2>
+            <span class="meta mono" id="session-pill">15s</span>
           </div>
-          <div class="twitter-feed" id="twitter-feed">
-            <p class="empty-state">live computer posts on x</p>
-            <p class="twitter-bio mono">grok bots come with a built-in computer. this one’s public. queue up and use it. a little blockchain experiment.</p>
-            <a class="btn btn-ghost btn-block" href="https://x.com/botcomputerxai" target="_blank" rel="noopener noreferrer">@botcomputerxai →</a>
+          <p class="card-sub">connect phantom for seat identity. optional display name. queue ranks by token holdings, then join time. seat drives the agent computer only - never the owner's pc.</p>
+          <div class="wallet-row">
+            <button type="button" class="btn btn-primary" id="btn-wallet">connect wallet</button>
+            <span class="wallet-addr mono" id="wallet-addr">not connected</span>
           </div>
+          <label class="field">
+            <span class="field-label">display name (optional)</span>
+            <input type="text" id="display-name" class="text-input mono" maxlength="32" placeholder="guest-xxxx" autocomplete="nickname" />
+          </label>
+          <div class="stat-stack">
+            <div class="stat">
+              <span class="stat-label">status</span>
+              <span class="stat-value mono" id="you-status">ready</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">queue pos</span>
+              <span class="stat-value mono" id="you-position">-</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">eta</span>
+              <span class="stat-value mono" id="you-eta">-</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">holdings</span>
+              <span class="stat-value mono" id="you-holdings">-</span>
+            </div>
+          </div>
+          <button type="button" class="btn btn-primary btn-block" id="btn-join">join</button>
+          <button type="button" class="btn btn-ghost btn-block" id="btn-leave" hidden>leave</button>
+          <p class="status-line mono" id="join-status" role="status"></p>
         </div>
 
         <div class="card queue-card" id="queue">
@@ -150,21 +121,44 @@
             <h2>live queue</h2>
             <span class="meta mono" id="queue-count">0 waiting</span>
           </div>
-          <p class="card-sub">fifo by join time</p>
+          <p class="card-sub">sorted by holdings desc, ties by join time</p>
           <div class="table-wrap">
             <table class="queue-table">
               <thead>
                 <tr>
                   <th>#</th>
                   <th>name</th>
+                  <th>holdings</th>
                   <th>eta</th>
                 </tr>
               </thead>
               <tbody id="queue-body">
-                <tr class="empty-row"><td colspan="3">queue empty - join to play</td></tr>
+                <tr class="empty-row"><td colspan="4">queue empty - connect wallet and join</td></tr>
               </tbody>
             </table>
           </div>
+        </div>
+
+        <div class="card" id="twitter">
+          <div class="card-head">
+            <h2>twitter</h2>
+            <span class="meta mono">agent</span>
+          </div>
+          <div class="twitter-feed" id="twitter-feed">
+            <p class="empty-state">live computer posts on x</p>
+            <p class="twitter-bio mono">grok bots come with a built-in computer. this one's public. queue up and use it. a little blockchain experiment.</p>
+            <a class="btn btn-ghost btn-block" href="https://x.com/botcomputerxai" target="_blank" rel="noopener noreferrer">@botcomputerxai →</a>
+          </div>
+          <ul class="crew-list" id="crew-list">
+            <li>
+              <span class="crew-name">live computer</span>
+              <span class="crew-role">agent computer desk / stream</span>
+            </li>
+            <li>
+              <a class="crew-name" href="https://x.com/botcomputerxai" target="_blank" rel="noopener noreferrer">twitter</a>
+              <span class="crew-role">@botcomputerxai</span>
+            </li>
+          </ul>
         </div>
       </div>
     </section>
@@ -172,7 +166,7 @@
 
   <footer class="footer">
     <div class="footer-inner mono">
-      <span>play-arcade · guest fifo · free play · agent computer only</span>
+      <span>play-arcade · holdings queue · agent computer only</span>
       <span class="dim" id="you-chip">you <span id="you-label">-</span></span>
     </div>
   </footer>

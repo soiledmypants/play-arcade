@@ -1,7 +1,6 @@
 const $ = (id) => document.getElementById(id);
 
 const API_BASE = (window.PLAY_API_BASE || "").replace(/\/$/, "");
-const STORAGE_CLIENT = "play-arcade.clientId";
 const STORAGE_NAME = "play-arcade.displayName";
 const TWITTER_URL = "https://x.com/botcomputerxai";
 
@@ -23,13 +22,17 @@ const els = {
   youStatus: $("you-status"),
   youPosition: $("you-position"),
   youEta: $("you-eta"),
+  youHoldings: $("you-holdings"),
   btnJoin: $("btn-join"),
   btnLeave: $("btn-leave"),
+  btnWallet: $("btn-wallet"),
+  walletAddr: $("wallet-addr"),
   joinStatus: $("join-status"),
   displayName: $("display-name"),
   youChip: $("you-chip"),
   youLabel: $("you-label"),
   npName: $("np-name"),
+  npHoldings: $("np-holdings"),
   npTime: $("np-time"),
   npStatus: $("np-status"),
   liveDot: $("live-dot"),
@@ -42,17 +45,19 @@ const els = {
   streamOverlay: $("stream-overlay"),
   streamOverlayTitle: $("stream-overlay-title"),
   streamOverlaySub: $("stream-overlay-sub"),
-  streamTip: $("stream-tip"),
   crewList: $("crew-list"),
 };
 
 let config = {
-  sessionSeconds: 10,
+  sessionSeconds: 15,
   sessionUnlimited: false,
   stream: null,
   crew: null,
+  demoMode: false,
+  tokenMint: "",
 };
-let clientId = null;
+/** @type {string|null} */
+let wallet = null;
 let lastState = null;
 let busy = false;
 /** @type {"view"|"control"|null} */
@@ -62,30 +67,25 @@ let streamCheckBusy = false;
 let streamBlobUrl = null;
 let streamLoadToken = 0;
 
-const STREAM_TIP =
-  "stream uses an isolated blob loader so wallet extensions (phantom, solflare, etc.) do not inject into noVNC. agent computer only, never the owner's pc.";
-
-function randomId() {
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+function shortWallet(addr) {
+  if (!addr) return "-";
+  if (addr.length <= 10) return addr;
+  return `${addr.slice(0, 4)}…${addr.slice(-4)}`;
 }
 
-function ensureClientId() {
-  try {
-    let id = localStorage.getItem(STORAGE_CLIENT);
-    if (!id || !/^[A-Za-z0-9_-]{8,64}$/.test(id)) {
-      id = randomId();
-      localStorage.setItem(STORAGE_CLIENT, id);
-    }
-    return id;
-  } catch {
-    return randomId();
-  }
+function formatHoldings(n) {
+  if (n == null || !Number.isFinite(Number(n))) return "-";
+  const v = Number(n);
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(2)}m`;
+  if (v >= 10_000) return `${Math.round(v).toLocaleString("en-US")}`;
+  if (v >= 100) return v.toFixed(1);
+  if (v >= 1) return v.toFixed(2);
+  if (v === 0) return "0";
+  return v.toFixed(4);
 }
 
-function defaultGuestName(id) {
-  const suffix = (id || "guest").slice(-4);
+function defaultGuestName(addr) {
+  const suffix = (addr || "guest").slice(-4);
   return `guest-${suffix}`;
 }
 
@@ -108,7 +108,8 @@ function saveName(name) {
 function currentName() {
   const typed = (els.displayName?.value || "").trim();
   if (typed) return typed.slice(0, 32);
-  return defaultGuestName(clientId);
+  if (wallet) return defaultGuestName(wallet);
+  return "";
 }
 
 function setStatus(msg, kind = "") {
@@ -153,6 +154,110 @@ function offlineMessage() {
   return config.stream?.offlineMessage || "stream offline - agent computer not linked";
 }
 
+function getProvider() {
+  const sol = window.solana;
+  if (sol?.isPhantom) return sol;
+  if (sol) return sol;
+  return null;
+}
+
+function refreshWalletUi() {
+  if (!els.walletAddr || !els.btnWallet) return;
+  if (wallet) {
+    els.walletAddr.textContent = shortWallet(wallet);
+    els.walletAddr.title = wallet;
+    els.walletAddr.classList.add("connected");
+    els.btnWallet.textContent = "disconnect";
+  } else {
+    els.walletAddr.textContent = "not connected";
+    els.walletAddr.removeAttribute("title");
+    els.walletAddr.classList.remove("connected");
+    els.btnWallet.textContent = "connect wallet";
+  }
+  if (els.displayName && wallet && !els.displayName.value.trim()) {
+    els.displayName.placeholder = defaultGuestName(wallet);
+  }
+}
+
+async function connectWallet() {
+  const provider = getProvider();
+  if (!provider) {
+    setStatus("phantom not found - install phantom or open in a wallet browser", "err");
+    return;
+  }
+  try {
+    const res = await provider.connect();
+    const key = res?.publicKey?.toString?.() || provider.publicKey?.toString?.();
+    if (!key) throw new Error("no public key");
+    wallet = key;
+    refreshWalletUi();
+    refreshYouUi();
+    setStatus("wallet connected", "ok");
+  } catch (err) {
+    setStatus(String(err.message || err || "wallet connect failed"), "err");
+  }
+}
+
+async function disconnectWallet() {
+  const provider = getProvider();
+  try {
+    if (provider?.disconnect) await provider.disconnect();
+  } catch {
+    /* ignore */
+  }
+  wallet = null;
+  refreshWalletUi();
+  refreshYouUi();
+  setStatus("wallet disconnected");
+}
+
+async function toggleWallet() {
+  if (wallet) await disconnectWallet();
+  else await connectWallet();
+}
+
+function bindWalletEvents() {
+  const provider = getProvider();
+  if (!provider?.on) return;
+  provider.on("accountChanged", (publicKey) => {
+    if (publicKey) {
+      wallet = publicKey.toString();
+    } else {
+      wallet = null;
+    }
+    refreshWalletUi();
+    refreshYouUi();
+    syncStreamFrame(true);
+  });
+  provider.on("disconnect", () => {
+    wallet = null;
+    refreshWalletUi();
+    refreshYouUi();
+    syncStreamFrame(true);
+  });
+}
+
+async function trySilentWallet() {
+  const provider = getProvider();
+  if (!provider) return;
+  try {
+    if (provider.isConnected && provider.publicKey) {
+      wallet = provider.publicKey.toString();
+      refreshWalletUi();
+      return;
+    }
+    // some providers support onlyIfTrusted
+    const res = await provider.connect({ onlyIfTrusted: true });
+    const key = res?.publicKey?.toString?.() || provider.publicKey?.toString?.();
+    if (key) {
+      wallet = key;
+      refreshWalletUi();
+    }
+  } catch {
+    /* user has not trusted yet */
+  }
+}
+
 function renderCrew(crew) {
   if (!els.crewList || !Array.isArray(crew)) return;
   els.crewList.innerHTML = crew
@@ -180,13 +285,10 @@ function applyConfig(cfg) {
   if (els.sessionLabel) els.sessionLabel.textContent = sessionLabelText();
   if (els.sessionPill) els.sessionPill.textContent = sessionPillText();
   if (els.modeLabel) {
-    els.modeLabel.textContent = "guest fifo";
+    els.modeLabel.textContent = "holdings queue";
   }
   if (els.streamNote && config.stream?.note) {
     els.streamNote.title = config.stream.note;
-  }
-  if (els.streamTip) {
-    els.streamTip.textContent = STREAM_TIP;
   }
   if (Array.isArray(config.crew)) renderCrew(config.crew);
   refreshYouUi();
@@ -194,22 +296,24 @@ function applyConfig(cfg) {
 }
 
 function findYou(state) {
-  if (!clientId || !state) return { kind: "absent" };
+  if (!wallet || !state) return { kind: "absent" };
   const np = state.nowPlaying;
-  if (np && np.clientId === clientId) {
+  if (np && np.wallet === wallet) {
     return {
       kind: "playing",
       remainingSeconds: np.remainingSeconds,
       name: np.name,
+      holdings: np.holdings,
     };
   }
-  const q = (state.queue || []).find((row) => row.clientId === clientId);
+  const q = (state.queue || []).find((row) => row.wallet === wallet);
   if (q) {
     return {
       kind: "queued",
       position: q.position,
       etaSeconds: q.etaSeconds,
       name: q.name,
+      holdings: q.holdings,
     };
   }
   return { kind: "absent" };
@@ -217,12 +321,28 @@ function findYou(state) {
 
 function refreshYouUi() {
   const you = findYou(lastState);
-  const name = currentName();
-  if (els.youLabel) els.youLabel.textContent = name;
+  const label = wallet
+    ? `${currentName() || defaultGuestName(wallet)} (${shortWallet(wallet)})`
+    : "not connected";
+  if (els.youLabel) els.youLabel.textContent = label;
+
+  if (!wallet) {
+    els.youStatus.textContent = "connect wallet";
+    els.youPosition.textContent = "-";
+    els.youEta.textContent = "-";
+    if (els.youHoldings) els.youHoldings.textContent = "-";
+    els.btnLeave.hidden = true;
+    els.btnJoin.disabled = busy;
+    els.btnJoin.textContent = "join";
+    syncStreamFrame();
+    return;
+  }
+
   if (you.kind === "playing") {
     els.youStatus.textContent = "now playing";
     els.youPosition.textContent = "seat";
     els.youEta.textContent = formatCountdown(you.remainingSeconds);
+    if (els.youHoldings) els.youHoldings.textContent = formatHoldings(you.holdings);
     els.btnLeave.hidden = false;
     els.btnLeave.textContent = "leave seat";
     els.btnJoin.disabled = busy;
@@ -231,6 +351,7 @@ function refreshYouUi() {
     els.youStatus.textContent = "in queue";
     els.youPosition.textContent = `#${you.position}`;
     els.youEta.textContent = formatEta(you.etaSeconds);
+    if (els.youHoldings) els.youHoldings.textContent = formatHoldings(you.holdings);
     els.btnLeave.hidden = false;
     els.btnLeave.textContent = "leave queue";
     els.btnJoin.disabled = busy;
@@ -239,6 +360,7 @@ function refreshYouUi() {
     els.youStatus.textContent = "ready";
     els.youPosition.textContent = "-";
     els.youEta.textContent = "-";
+    if (els.youHoldings) els.youHoldings.textContent = "-";
     els.btnLeave.hidden = true;
     els.btnJoin.disabled = busy;
     els.btnJoin.textContent = "join";
@@ -379,7 +501,7 @@ async function loadStreamFrame(mode) {
 
 function desiredStreamMode(state) {
   const np = state?.nowPlaying;
-  if (clientId && np && np.clientId === clientId) return "control";
+  if (wallet && np && np.wallet === wallet) return "control";
   return "view";
 }
 
@@ -473,7 +595,11 @@ function renderState(state) {
   if (np) {
     els.npStatus.textContent = "live";
     els.liveDot?.classList.add("on");
-    els.npName.textContent = np.name || "player";
+    els.npName.textContent = np.name || shortWallet(np.wallet) || "player";
+    if (els.npHoldings) {
+      els.npHoldings.textContent = formatHoldings(np.holdings);
+      els.npHoldings.title = np.wallet || "";
+    }
     els.npTime.textContent = formatCountdown(
       sessionIsUnlimited() ? null : np.remainingSeconds ?? sessionSecs
     );
@@ -481,6 +607,10 @@ function renderState(state) {
     els.npStatus.textContent = "idle";
     els.liveDot?.classList.remove("on");
     els.npName.textContent = "empty";
+    if (els.npHoldings) {
+      els.npHoldings.textContent = "-";
+      els.npHoldings.removeAttribute("title");
+    }
     els.npTime.textContent = "-";
   }
   syncStreamFrame();
@@ -489,13 +619,14 @@ function renderState(state) {
   els.queueCount.textContent = `${queue.length} waiting`;
   if (!queue.length) {
     els.queueBody.innerHTML =
-      '<tr class="empty-row"><td colspan="3">queue empty - join to play</td></tr>';
+      '<tr class="empty-row"><td colspan="4">queue empty - connect wallet and join</td></tr>';
   } else {
     els.queueBody.innerHTML = queue
       .map(
         (q) => `<tr>
           <td>${q.position}</td>
-          <td title="${q.clientId || ""}">${q.name || "guest"}</td>
+          <td title="${q.wallet || ""}">${q.name || shortWallet(q.wallet)}</td>
+          <td>${formatHoldings(q.holdings)}</td>
           <td>${formatEta(q.etaSeconds)}</td>
         </tr>`
       )
@@ -513,7 +644,12 @@ async function fetchState() {
 }
 
 async function joinQueue() {
-  if (!clientId || busy) return;
+  if (busy) return;
+  if (!wallet) {
+    setStatus("connect wallet to join", "err");
+    await connectWallet();
+    if (!wallet) return;
+  }
   busy = true;
   refreshYouUi();
   const name = currentName();
@@ -526,17 +662,23 @@ async function joinQueue() {
     const res = await fetch(apiUrl("/api/queue/join"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ clientId, name }),
+      body: JSON.stringify({ wallet, name }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "join failed");
     if (data.state) renderState(data.state);
     else await fetchState();
     if (data.status === "playing") {
-      setStatus(data.message || "you have the seat", "ok");
+      setStatus(
+        `${data.message || "you have the seat"} · holdings ${formatHoldings(data.holdings)}`,
+        "ok"
+      );
     } else if (data.status === "queued") {
       const pos = data.position != null ? ` (#${data.position})` : "";
-      setStatus((data.message || "joined the queue") + pos, "ok");
+      setStatus(
+        `${data.message || "joined the queue"}${pos} · holdings ${formatHoldings(data.holdings)}`,
+        "ok"
+      );
     } else {
       setStatus(data.message || "ok", "ok");
     }
@@ -549,7 +691,7 @@ async function joinQueue() {
 }
 
 async function leaveQueue() {
-  if (!clientId || busy) return;
+  if (!wallet || busy) return;
   busy = true;
   refreshYouUi();
   setStatus("leaving…");
@@ -557,7 +699,7 @@ async function leaveQueue() {
     const res = await fetch(apiUrl("/api/queue/leave"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ clientId }),
+      body: JSON.stringify({ wallet }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "leave failed");
@@ -575,6 +717,7 @@ async function leaveQueue() {
 function bind() {
   els.btnJoin.addEventListener("click", joinQueue);
   els.btnLeave.addEventListener("click", leaveQueue);
+  els.btnWallet?.addEventListener("click", toggleWallet);
   els.displayName?.addEventListener("change", () => {
     saveName((els.displayName.value || "").trim());
     refreshYouUi();
@@ -588,18 +731,20 @@ function bind() {
       joinQueue();
     }
   });
+  bindWalletEvents();
 }
 
 async function boot() {
-  clientId = ensureClientId();
   const saved = loadSavedName();
   if (els.displayName) {
-    els.displayName.value = saved || defaultGuestName(clientId);
-    els.displayName.placeholder = defaultGuestName(clientId);
+    els.displayName.value = saved;
+    els.displayName.placeholder = "guest-xxxx";
   }
   applyConfig(config);
+  refreshWalletUi();
   bind();
   showStreamOffline(offlineMessage());
+  await trySilentWallet();
   try {
     await fetchState();
   } catch (err) {
