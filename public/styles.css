@@ -266,7 +266,7 @@ a:hover { color: var(--amber); }
   min-height: 680px;
   height: clamp(680px, 84vh, 1100px);
   border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border-radius: 0;
   background: #050506;
   overflow: hidden;
   overscroll-behavior: none;

@@ -526,6 +526,11 @@ function injectStreamViewLock(html) {
         max-width: 100% !important;
         max-height: 100% !important;
         border: 0 !important;
+        border-radius: 0 !important;
+        border-bottom-right-radius: 0 !important;
+        border-bottom-left-radius: 0 !important;
+        border-top-right-radius: 0 !important;
+        border-top-left-radius: 0 !important;
         background: #000 !important;
       }
       #noVNC_container canvas,
