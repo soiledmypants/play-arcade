@@ -1,6 +1,6 @@
 # STREAM.md - browser remote desktop for play-site arcade
 
-Date: 2026-08-12 (America/New_York) - audio side channel added
+Date: 2026-08-12 (America/New_York) - audio side channel via WebSocket PCM
 Agent desktop under test: DISPLAY=:8 (1280x800 Xvfb)
 
 ## Inventory (what is already on this box)
@@ -13,7 +13,7 @@ Agent desktop under test: DISPLAY=:8 (1280x800 Xvfb)
 | noVNC | Installed (novnc 1.6.0) | /usr/share/novnc (vnc.html, vnc_lite.html). |
 | websockify | Installed + running | Platform :6080 for :1; token mux :6081 via /tmp/sand-novnc-tokens.d (8 -> localhost:5908). |
 | ffmpeg | Installed | HLS fallback possible; worse interactive UX. |
-| pulseaudio | Installed + running (user) | Null sink `playdesk` on XDG for :8; side-channel MP3 via `/audio/stream.mp3`. |
+| pulseaudio | Installed + running (user) | Null sink `playdesk` on XDG for :8; side-channel PCM via WebSocket `/audio/ws`. |
 | Google Chrome | Installed + running on :8 | Full internet browsing works in-session. |
 | Selkies-GStreamer | Not installed | Heavier than needed for today. |
 | gstreamer CLI | Missing | Blocks easy Selkies path without apt. |
@@ -164,19 +164,24 @@ If localhost bridge failed:
 
 ## Audio (side channel) - DONE 2026-08-12
 
-noVNC still does not carry desktop sound. Audio is a **separate HTTP side channel**
+noVNC still does not carry desktop sound. Audio is a **separate WebSocket PCM side channel**
 on the play-site API origin (same place as `/stream/`), so Netlify can play it via
 `PLAY_API_BASE`.
+
+Why not progressive HTTP MP3: Cloudflare quick tunnels return HTTP 200 + `audio/mpeg`
+headers for infinite MP3 bodies but deliver **0 body bytes** (buffering). WebSocket
+binary frames pass through the same way noVNC does.
 
 | Piece | Detail |
 |---|---|
 | Pulse | User daemon, null sink `playdesk` (no `/dev/snd` needed) |
 | Socket | `unix:/tmp/xdg-runtime-box-8/pulse/native` (`XDG_RUNTIME_DIR` for box-chrome on :8) |
 | Client | `/home/box/.config/pulse/client.conf` sets `default-server` (autospawn off) |
-| Capture | `ffmpeg -f pulse -i playdesk.monitor` -> MP3 128k stereo 44.1kHz |
-| URL | `/audio/stream.mp3` (`Content-Type: audio/mpeg`) |
-| Supervise | `server.py` AudioBridge spawns ffmpeg, fans out to clients, restarts on exit |
-| UI | `unmute` / `mute` control under the stream (default muted; browsers block autoplay with sound) |
+| Capture | `ffmpeg -f pulse -i playdesk.monitor` -> raw PCM mono s16le @ 24kHz |
+| URL | WebSocket `/audio/ws` (hello JSON, then binary PCM frames) |
+| Debug HTTP | `/audio/stream.pcm` raw PCM for local curl only (not Cloudflare-safe) |
+| Supervise | `server.py` AudioBridge spawns ffmpeg, fans out to client queues, restarts on exit |
+| UI | `unmute` / `mute` under the stream (default muted; browsers block autoplay with sound) |
 
 ### Start / verify
 
@@ -187,7 +192,25 @@ DISPLAY=:8 /usr/local/bin/box-chrome --start-maximized https://www.google.com
 
 cd /workspace/play-site && python3 server.py   # supervises ffmpeg
 
-curl -sI http://127.0.0.1:8787/audio/stream.mp3 | rg -i 'HTTP|content-type'
+# local WS: hello + non-zero PCM energy
+python3 - <<'PY'
+import json, struct, time
+from websocket import create_connection
+ws = create_connection("ws://127.0.0.1:8787/audio/ws", timeout=5)
+hello = json.loads(ws.recv())
+assert hello.get("type") == "hello" and hello.get("format") == "s16le"
+raw = b""
+deadline = time.time() + 3
+while time.time() < deadline and len(raw) < 8000:
+    frame = ws.recv()
+    if isinstance(frame, bytes):
+        raw += frame
+ws.close()
+samples = struct.unpack("<" + "h" * (len(raw)//2), raw[:len(raw)//2*2])
+energy = sum(abs(s) for s in samples) / max(1, len(samples))
+print(hello, "bytes", len(raw), "energy", round(energy, 2))
+PY
+
 PULSE_SERVER=unix:/tmp/xdg-runtime-box-8/pulse/native pactl list short sinks
 ```
 
@@ -196,6 +219,6 @@ Logs: `logs/pulseaudio.log`, `logs/audio-ffmpeg.log`, `logs/pulseaudio.pid`.
 ### Residual limits
 
 - Autoplay: browsers require a user gesture; the UI stays muted until **unmute**.
-- Latency: HTTP MP3 is typically ~1-3s behind the noVNC video (not lip-sync).
-- Tunnel: Cloudflare/Netlify must not buffer the entire `/audio/` response; it is an infinite live body.
-- Sync: video (RFB) and audio (MP3) are independent clocks; expect drift under load.
+- Latency: PCM WS is typically under ~1s behind the noVNC video (not lip-sync).
+- Tunnel: use `wss://.../audio/ws`. Do not rely on HTTP progressive MP3 through Cloudflare.
+- Sync: video (RFB) and audio (PCM WS) are independent clocks; expect drift under load.

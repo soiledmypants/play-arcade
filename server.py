@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import atexit
+import base64
+import hashlib
 import http.client
 import json
 import os
@@ -11,6 +13,7 @@ import queue
 import re
 import select
 import socket
+import struct
 import subprocess
 import threading
 import time
@@ -98,15 +101,20 @@ STREAM_CONTROL_PATH = (
     f"{STREAM_PREFIX}/vnc.html?autoconnect=1&resize=scale&path=stream/"
 )
 
-# Desktop audio side channel (Pulse null-sink -> ffmpeg mp3). Separate from noVNC.
+# Desktop audio side channel (Pulse null-sink -> ffmpeg PCM over WebSocket).
+# HTTP progressive MP3 is buffered to empty by Cloudflare tunnels; use WS instead.
 AUDIO_PREFIX = "/audio"
-AUDIO_STREAM_PATH = f"{AUDIO_PREFIX}/stream.mp3"
-AUDIO_CONTENT_TYPE = "audio/mpeg"
+AUDIO_WS_PATH = f"{AUDIO_PREFIX}/ws"
+AUDIO_STREAM_PATH = f"{AUDIO_PREFIX}/stream.pcm"  # local debug raw PCM (not for CF)
+AUDIO_CONTENT_TYPE = "application/octet-stream"
+AUDIO_SAMPLE_RATE = 24000
+AUDIO_CHANNELS = 1
+AUDIO_FORMAT = "s16le"
 AUDIO_PULSE_SERVER = os.environ.get(
     "PULSE_SERVER", "unix:/tmp/xdg-runtime-box-8/pulse/native"
 )
 AUDIO_PULSE_SINK = os.environ.get("PLAY_PULSE_SINK", "playdesk")
-AUDIO_BITRATE = os.environ.get("PLAY_AUDIO_BITRATE", "128k")
+WS_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 CREW = [
     {
@@ -360,12 +368,87 @@ def tick_sessions() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Desktop audio bridge (Pulse monitor -> ffmpeg mp3 fanout)
+# Desktop audio bridge (Pulse monitor -> ffmpeg raw PCM fanout)
 # ---------------------------------------------------------------------------
 
 
+def _ws_accept_key(key: str) -> str:
+    dig = hashlib.sha1(key.encode("utf-8") + WS_GUID).digest()
+    return base64.b64encode(dig).decode("ascii")
+
+
+def _ws_send_frame(sock: socket.socket, opcode: int, payload: bytes) -> None:
+    header = bytearray()
+    header.append(0x80 | (opcode & 0x0F))
+    n = len(payload)
+    if n < 126:
+        header.append(n)
+    elif n < 65536:
+        header.append(126)
+        header.extend(struct.pack("!H", n))
+    else:
+        header.append(127)
+        header.extend(struct.pack("!Q", n))
+    sock.sendall(bytes(header) + payload)
+
+
+def _recvexact(sock: socket.socket, n: int) -> bytes | None:
+    buf = bytearray()
+    while len(buf) < n:
+        try:
+            chunk = sock.recv(n - len(buf))
+        except BlockingIOError:
+            return None if not buf else None
+        except OSError:
+            return None
+        if not chunk:
+            return None
+        buf.extend(chunk)
+    return bytes(buf)
+
+
+def _ws_try_read_frame(sock: socket.socket) -> tuple[int, bytes] | None:
+    """Non-blocking-ish: return (opcode, payload) or None if no complete frame yet / closed."""
+    try:
+        readable, _, _ = select.select([sock], [], [], 0)
+    except (OSError, ValueError):
+        return (-1, b"")
+    if not readable:
+        return None
+    hdr = _recvexact(sock, 2)
+    if hdr is None:
+        return (-1, b"")
+    b0, b1 = hdr[0], hdr[1]
+    opcode = b0 & 0x0F
+    masked = (b1 & 0x80) != 0
+    length = b1 & 0x7F
+    if length == 126:
+        ext = _recvexact(sock, 2)
+        if ext is None:
+            return (-1, b"")
+        length = struct.unpack("!H", ext)[0]
+    elif length == 127:
+        ext = _recvexact(sock, 8)
+        if ext is None:
+            return (-1, b"")
+        length = struct.unpack("!Q", ext)[0]
+    mask = b""
+    if masked:
+        mask = _recvexact(sock, 4)
+        if mask is None:
+            return (-1, b"")
+    payload = b""
+    if length:
+        payload = _recvexact(sock, length)
+        if payload is None:
+            return (-1, b"")
+        if masked:
+            payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+    return opcode, payload
+
+
 class AudioBridge:
-    """Supervise ffmpeg capturing a Pulse sink monitor; fan out MP3 to HTTP clients."""
+    """Supervise ffmpeg capturing a Pulse sink monitor; fan out PCM to WS/HTTP clients."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -384,16 +467,22 @@ class AudioBridge:
 
     def status(self) -> dict[str, Any]:
         return {
+            "wsPath": AUDIO_WS_PATH,
+            "sampleRate": AUDIO_SAMPLE_RATE,
+            "channels": AUDIO_CHANNELS,
+            "format": AUDIO_FORMAT,
             "path": AUDIO_STREAM_PATH,
             "contentType": AUDIO_CONTENT_TYPE,
-            "codec": "mp3",
-            "bitrate": AUDIO_BITRATE,
             "pulseServer": AUDIO_PULSE_SERVER,
             "pulseSink": AUDIO_PULSE_SINK,
             "running": self.running,
             "clients": len(self._clients),
             "restarts": self._restarts,
             "lastError": self._last_error or None,
+            "note": (
+                "WebSocket PCM via /audio/ws. "
+                "HTTP progressive MP3 is broken through Cloudflare (buffered empty body)."
+            ),
         }
 
     def start(self) -> None:
@@ -469,7 +558,10 @@ class AudioBridge:
         log_path = LOG_DIR / "audio-ffmpeg.log"
         log_f = open(log_path, "a", encoding="utf-8")
         stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        log_f.write(f"\n--- spawn {stamp} sink={AUDIO_PULSE_SINK} ---\n")
+        log_f.write(
+            f"\n--- spawn {stamp} sink={AUDIO_PULSE_SINK} "
+            f"pcm={AUDIO_FORMAT} {AUDIO_CHANNELS}ch {AUDIO_SAMPLE_RATE}Hz ---\n"
+        )
         log_f.flush()
         env = os.environ.copy()
         env["PULSE_SERVER"] = AUDIO_PULSE_SERVER
@@ -483,15 +575,11 @@ class AudioBridge:
             "-i",
             f"{AUDIO_PULSE_SINK}.monitor",
             "-ac",
-            "2",
+            str(AUDIO_CHANNELS),
             "-ar",
-            "44100",
-            "-c:a",
-            "libmp3lame",
-            "-b:a",
-            AUDIO_BITRATE,
+            str(AUDIO_SAMPLE_RATE),
             "-f",
-            "mp3",
+            AUDIO_FORMAT,
             "-",
         ]
         return subprocess.Popen(
@@ -509,6 +597,7 @@ class AudioBridge:
                 proc = self._spawn()
                 self._proc = proc
                 assert proc.stdout is not None
+                # ~85ms of mono s16le @ 24kHz per read
                 while not self._stop:
                     chunk = proc.stdout.read(4096)
                     if not chunk:
@@ -582,11 +671,17 @@ def public_config() -> dict[str, Any]:
                 "(view_only is client-side only without a gate)."
             ),
             "audio": {
+                "wsPath": AUDIO_WS_PATH,
+                "sampleRate": AUDIO_SAMPLE_RATE,
+                "channels": AUDIO_CHANNELS,
+                "format": AUDIO_FORMAT,
                 "path": AUDIO_STREAM_PATH,
                 "contentType": AUDIO_CONTENT_TYPE,
-                "codec": "mp3",
                 "note": (
-                    "desktop audio side channel (not inside noVNC). "
+                    "desktop audio side channel (not inside noVNC): "
+                    "WebSocket PCM at /audio/ws. "
+                    "HTTP progressive MP3 is broken via Cloudflare "
+                    "(infinite body buffered to 0 bytes). "
                     "browsers block autoplay with sound; unmute in the UI."
                 ),
             },
@@ -998,6 +1093,7 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
 
     def _handle_audio_stream(self) -> None:
+        """Local debug: raw PCM over HTTP. Prefer /audio/ws (Cloudflare-safe)."""
         bridge = ensure_audio_bridge()
         self.send_response(200)
         self._audio_headers(streaming=True)
@@ -1008,7 +1104,6 @@ class Handler(SimpleHTTPRequestHandler):
                 try:
                     chunk = q.get(timeout=60.0)
                 except queue.Empty:
-                    # Keep the connection; encoder may be quiet after a restart.
                     continue
                 if chunk is None:
                     break
@@ -1016,6 +1111,75 @@ class Handler(SimpleHTTPRequestHandler):
                 try:
                     self.wfile.flush()
                 except Exception:
+                    break
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            bridge.unsubscribe(q)
+            self.close_connection = True
+
+    def _handle_audio_ws(self) -> None:
+        key = (self.headers.get("Sec-WebSocket-Key") or "").strip()
+        upgrade = (self.headers.get("Upgrade") or "").lower()
+        if not key or upgrade != "websocket":
+            self.send_response(400)
+            self._cors()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(
+                b'{"error":"expected websocket upgrade to /audio/ws"}'
+            )
+            return
+
+        bridge = ensure_audio_bridge()
+        accept = _ws_accept_key(key)
+        self.send_response(101, "Switching Protocols")
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", accept)
+        self.end_headers()
+
+        sock = self.connection
+        q = bridge.subscribe()
+        try:
+            hello = {
+                "type": "hello",
+                "sampleRate": AUDIO_SAMPLE_RATE,
+                "channels": AUDIO_CHANNELS,
+                "format": AUDIO_FORMAT,
+            }
+            _ws_send_frame(sock, 0x1, json.dumps(hello).encode("utf-8"))
+            sock.setblocking(True)
+            while True:
+                # Drain client control frames (ping/close) without blocking the audio fanout.
+                while True:
+                    frame = _ws_try_read_frame(sock)
+                    if frame is None:
+                        break
+                    opcode, payload = frame
+                    if opcode < 0:
+                        return
+                    if opcode == 0x8:  # close
+                        try:
+                            _ws_send_frame(sock, 0x8, payload[:2] if payload else b"")
+                        except OSError:
+                            pass
+                        return
+                    if opcode == 0x9:  # ping -> pong
+                        try:
+                            _ws_send_frame(sock, 0xA, payload)
+                        except OSError:
+                            return
+                    # ignore text/binary from client
+                try:
+                    chunk = q.get(timeout=1.0)
+                except queue.Empty:
+                    continue
+                if chunk is None:
+                    break
+                try:
+                    _ws_send_frame(sock, 0x2, chunk)
+                except OSError:
                     break
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
@@ -1039,11 +1203,14 @@ class Handler(SimpleHTTPRequestHandler):
             cfg["stream"]["audioStatus"] = _audio_bridge.status()
             self._json(200, {"ok": True, "config": cfg})
             return
+        if path == AUDIO_WS_PATH:
+            self._handle_audio_ws()
+            return
         if path == AUDIO_STREAM_PATH or path == AUDIO_PREFIX or path == AUDIO_PREFIX + "/":
-            # Canonical live stream; trailing slash / bare prefix redirect mentally to stream.mp3
+            # Local raw PCM debug stream; browsers should use /audio/ws.
             if path != AUDIO_STREAM_PATH:
                 self.send_response(302)
-                self.send_header("Location", AUDIO_STREAM_PATH)
+                self.send_header("Location", AUDIO_WS_PATH)
                 self._cors()
                 self.end_headers()
                 return
@@ -1058,6 +1225,12 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_HEAD(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
+        if path == AUDIO_WS_PATH:
+            self.send_response(405)
+            self.send_header("Allow", "GET")
+            self._cors()
+            self.end_headers()
+            return
         if path == AUDIO_STREAM_PATH or path == AUDIO_PREFIX or path == AUDIO_PREFIX + "/":
             self._handle_audio_head()
             return
@@ -1122,8 +1295,8 @@ def main() -> None:
     print(f"  TOKEN_MINT={TOKEN_MINT}")
     print(f"  stream proxy {STREAM_PREFIX}/ -> {STREAM_UPSTREAM} (loopback only)")
     print(
-        f"  audio {AUDIO_STREAM_PATH} <- pulse:{AUDIO_PULSE_SINK}.monitor "
-        f"({AUDIO_CONTENT_TYPE})"
+        f"  audio {AUDIO_WS_PATH} <- pulse:{AUDIO_PULSE_SINK}.monitor "
+        f"({AUDIO_FORMAT} {AUDIO_CHANNELS}ch {AUDIO_SAMPLE_RATE}Hz)"
     )
     print(f"  static={PUBLIC}")
     try:

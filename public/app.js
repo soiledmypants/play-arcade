@@ -46,7 +46,6 @@ const els = {
   streamOverlayTitle: $("stream-overlay-title"),
   streamOverlaySub: $("stream-overlay-sub"),
   btnAudio: $("btn-audio"),
-  deskAudio: $("desk-audio"),
   crewList: $("crew-list"),
 };
 
@@ -70,6 +69,19 @@ let streamBlobUrl = null;
 let streamLoadToken = 0;
 let audioWanted = false;
 let audioBound = false;
+/** @type {AudioContext|null} */
+let audioCtx = null;
+/** @type {WebSocket|null} */
+let audioWs = null;
+/** @type {ScriptProcessorNode|null} */
+let audioProcessor = null;
+/** @type {Float32Array[]} */
+let audioPcmQueue = [];
+let audioPcmQueuedSamples = 0;
+let audioBridgeRate = 24000;
+let audioChannels = 1;
+const AUDIO_PCM_MAX_SAMPLES = 24000 * 3; // ~3s cap
+
 
 function shortWallet(addr) {
   if (!addr) return "-";
@@ -385,9 +397,19 @@ function streamAssetBase() {
 }
 
 
-function audioStreamUrl() {
-  const path = config.stream?.audio?.path || "/audio/stream.mp3";
-  return absolutizePath(path);
+function audioWsUrl() {
+  const path = config.stream?.audio?.wsPath || "/audio/ws";
+  const abs = absolutizePath(path);
+  try {
+    const u = new URL(abs, window.location.href);
+    u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
+    return u.toString();
+  } catch {
+    const origin = streamApiOrigin();
+    const proto = origin.protocol === "https:" ? "wss:" : "ws:";
+    const p = path.startsWith("/") ? path : `/${path}`;
+    return `${proto}//${origin.host}${p}`;
+  }
 }
 
 function syncAudioButton() {
@@ -401,41 +423,189 @@ function syncAudioButton() {
     : "desktop audio starts muted; click to unmute";
 }
 
-function stopDeskAudio() {
-  const a = els.deskAudio;
-  if (!a) return;
-  try {
-    a.pause();
-  } catch {
-    /* ignore */
+function clearAudioPcmQueue() {
+  audioPcmQueue = [];
+  audioPcmQueuedSamples = 0;
+}
+
+function enqueuePcmInt16(int16) {
+  if (!int16 || !int16.length) return;
+  const f32 = new Float32Array(int16.length);
+  for (let i = 0; i < int16.length; i++) {
+    f32[i] = int16[i] / 32768;
   }
-  try {
-    a.removeAttribute("src");
-    a.load();
-  } catch {
-    /* ignore */
+  audioPcmQueue.push(f32);
+  audioPcmQueuedSamples += f32.length;
+  while (audioPcmQueuedSamples > AUDIO_PCM_MAX_SAMPLES && audioPcmQueue.length > 1) {
+    const dropped = audioPcmQueue.shift();
+    audioPcmQueuedSamples -= dropped.length;
   }
 }
 
-async function startDeskAudio() {
-  const a = els.deskAudio;
-  if (!a) return;
-  const url = audioStreamUrl();
-  // Bust caches / proxies when (re)starting after mute.
-  const next = `${url}${url.includes("?") ? "&" : "?"}t=${Date.now()}`;
-  if (a.getAttribute("src") !== next) {
-    a.src = next;
+function pullPcmSamples(out) {
+  let offset = 0;
+  while (offset < out.length && audioPcmQueue.length) {
+    const head = audioPcmQueue[0];
+    const need = out.length - offset;
+    if (head.length <= need) {
+      out.set(head, offset);
+      offset += head.length;
+      audioPcmQueuedSamples -= head.length;
+      audioPcmQueue.shift();
+    } else {
+      out.set(head.subarray(0, need), offset);
+      audioPcmQueue[0] = head.subarray(need);
+      audioPcmQueuedSamples -= need;
+      offset += need;
+    }
   }
-  a.muted = false;
-  a.volume = 1;
+  if (offset < out.length) {
+    out.fill(0, offset);
+  }
+}
+
+function stopDeskAudio() {
+  if (audioWs) {
+    try {
+      audioWs.onopen = null;
+      audioWs.onmessage = null;
+      audioWs.onerror = null;
+      audioWs.onclose = null;
+      audioWs.close();
+    } catch {
+      /* ignore */
+    }
+    audioWs = null;
+  }
+  if (audioProcessor) {
+    try {
+      audioProcessor.disconnect();
+    } catch {
+      /* ignore */
+    }
+    audioProcessor.onaudioprocess = null;
+    audioProcessor = null;
+  }
+  if (audioCtx) {
+    const ctx = audioCtx;
+    audioCtx = null;
+    try {
+      ctx.close();
+    } catch {
+      try {
+        ctx.suspend();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  clearAudioPcmQueue();
+}
+
+async function startDeskAudio() {
+  stopDeskAudio();
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) {
+    audioWanted = false;
+    syncAudioButton();
+    console.warn("desk audio: AudioContext unavailable");
+    return;
+  }
+  audioBridgeRate = Number(config.stream?.audio?.sampleRate) || 24000;
+  audioChannels = Number(config.stream?.audio?.channels) || 1;
   try {
-    await a.play();
+    audioCtx = new AC({ sampleRate: audioBridgeRate });
+  } catch {
+    audioCtx = new AC();
+  }
+  try {
+    if (audioCtx.state === "suspended") {
+      await audioCtx.resume();
+    }
   } catch (err) {
     audioWanted = false;
     syncAudioButton();
     stopDeskAudio();
-    console.warn("desk audio play blocked", err);
+    console.warn("desk audio AudioContext resume blocked", err);
+    return;
   }
+
+  const bufferSize = 4096;
+  const proc = audioCtx.createScriptProcessor(bufferSize, 0, 1);
+  proc.onaudioprocess = (ev) => {
+    const out = ev.outputBuffer.getChannelData(0);
+    const srcRate = audioBridgeRate || 24000;
+    const dstRate = audioCtx?.sampleRate || srcRate;
+    if (srcRate === dstRate) {
+      pullPcmSamples(out);
+      return;
+    }
+    // Simple linear resample from bridge rate into AudioContext rate.
+    const needSrc = Math.ceil((out.length * srcRate) / dstRate) + 2;
+    const src = new Float32Array(needSrc);
+    pullPcmSamples(src);
+    const ratio = srcRate / dstRate;
+    for (let i = 0; i < out.length; i++) {
+      const pos = i * ratio;
+      const i0 = Math.floor(pos);
+      const i1 = Math.min(i0 + 1, src.length - 1);
+      const frac = pos - i0;
+      out[i] = src[i0] * (1 - frac) + src[i1] * frac;
+    }
+  };
+  proc.connect(audioCtx.destination);
+  audioProcessor = proc;
+
+  const wsUrl = audioWsUrl();
+  let ws;
+  try {
+    ws = new WebSocket(wsUrl);
+  } catch (err) {
+    audioWanted = false;
+    syncAudioButton();
+    stopDeskAudio();
+    console.warn("desk audio ws construct failed", err);
+    return;
+  }
+  ws.binaryType = "arraybuffer";
+  audioWs = ws;
+
+  ws.onmessage = (ev) => {
+    if (!audioWanted) return;
+    if (typeof ev.data === "string") {
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg && msg.type === "hello") {
+          if (msg.sampleRate) {
+            audioBridgeRate = Number(msg.sampleRate) || audioBridgeRate;
+            if (config.stream?.audio) {
+              config.stream.audio.sampleRate = audioBridgeRate;
+            }
+          }
+          if (msg.channels) audioChannels = Number(msg.channels) || 1;
+        }
+      } catch {
+        /* ignore non-json text */
+      }
+      return;
+    }
+    const buf = ev.data;
+    if (!(buf instanceof ArrayBuffer)) return;
+    enqueuePcmInt16(new Int16Array(buf));
+  };
+
+  ws.onerror = () => {
+    console.warn("desk audio ws error");
+  };
+
+  ws.onclose = () => {
+    if (audioWs === ws) audioWs = null;
+    if (!audioWanted) return;
+    // Retry shortly; bridge or tunnel may be restarting.
+    setTimeout(() => {
+      if (audioWanted) startDeskAudio();
+    }, 1200);
+  };
 }
 
 async function toggleDeskAudio() {
@@ -459,15 +629,6 @@ function bindAudioControls() {
   els.btnAudio?.addEventListener("click", () => {
     toggleDeskAudio();
   });
-  if (els.deskAudio) {
-    els.deskAudio.addEventListener("error", () => {
-      if (!audioWanted) return;
-      // Retry once shortly; ffmpeg/bridge may be restarting.
-      setTimeout(() => {
-        if (audioWanted) startDeskAudio();
-      }, 1200);
-    });
-  }
   syncAudioButton();
 }
 
@@ -739,7 +900,7 @@ function showStreamOffline(msg) {
 function showStreamOnline() {
   streamOnline = true;
   if (els.streamOverlay) els.streamOverlay.hidden = true;
-  if (audioWanted && els.deskAudio && els.deskAudio.paused) {
+  if (audioWanted && !audioWs) {
     startDeskAudio();
   }
 }
