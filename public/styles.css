@@ -16,9 +16,11 @@
   --red-dim: rgba(196, 92, 92, 0.12);
   --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --sans: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
-  --max: 1400px;
+  --max: 1480px;
   --radius: 6px;
   --topbar-h: 52px;
+  --rail-w: 280px;
+  --rail-w-right: 260px;
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -162,19 +164,38 @@ a:hover { color: var(--amber); }
 .btn-sm { padding: 0.4rem 0.7rem; font-size: 0.72rem; }
 .btn-block { width: 100%; margin-top: 0.65rem; }
 
-/* sticky full-bleed stream */
-.stream-stage {
-  padding: 0.65rem 0.75rem 0.5rem;
+/* desk: left join / center stream / right twitter / queue below */
+.desk {
+  padding: 0.65rem 0.75rem 2rem;
+}
+
+.desk-grid {
+  max-width: var(--max);
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: minmax(240px, var(--rail-w)) minmax(0, 1fr) minmax(220px, var(--rail-w-right));
+  grid-template-areas:
+    "join stream twitter"
+    "queue queue queue";
+  gap: 0.75rem;
+  align-items: start;
+}
+
+.rail-left { grid-area: join; min-width: 0; }
+.stream-col { grid-area: stream; min-width: 0; }
+.rail-right { grid-area: twitter; min-width: 0; }
+.queue-row { grid-area: queue; min-width: 0; }
+
+.rail .card,
+.queue-row .card {
+  height: 100%;
 }
 
 .stream-sticky {
   position: sticky;
-  top: var(--topbar-h);
+  top: calc(var(--topbar-h) + 0.35rem);
   z-index: 30;
-  max-width: var(--max);
-  margin: 0 auto;
   background: var(--bg);
-  padding-bottom: 0.35rem;
 }
 
 .screen-panel { min-width: 0; }
@@ -242,8 +263,8 @@ a:hover { color: var(--amber); }
 .screen {
   position: relative;
   width: 100%;
-  min-height: 560px;
-  height: clamp(560px, 76vh, 920px);
+  min-height: 520px;
+  height: clamp(520px, 72vh, 860px);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: #050506;
@@ -293,27 +314,6 @@ a:hover { color: var(--amber); }
   flex-wrap: wrap;
   gap: 0.35rem;
   align-items: center;
-}
-
-/* below-fold ops: join / queue / twitter */
-.ops { padding: 0.75rem 0.75rem 2rem; }
-.ops-inner {
-  max-width: var(--max);
-  margin: 0 auto;
-  display: grid;
-  grid-template-columns: minmax(260px, 320px) minmax(0, 1.2fr) minmax(220px, 300px);
-  gap: 0.75rem;
-  align-items: start;
-}
-
-@media (max-width: 1100px) {
-  .ops-inner { grid-template-columns: 1fr 1fr; }
-  .ops-inner > #twitter { grid-column: 1 / -1; }
-}
-
-@media (max-width: 760px) {
-  .ops-inner { grid-template-columns: 1fr; }
-  .topbar-bio { display: none; }
 }
 
 .card {
@@ -540,11 +540,45 @@ a.crew-name:hover {
   color: var(--amber);
 }
 
+/* tablet: stream on top, join + twitter side by side, queue full */
+@media (max-width: 1100px) {
+  .desk-grid {
+    grid-template-columns: 1fr 1fr;
+    grid-template-areas:
+      "stream stream"
+      "join twitter"
+      "queue queue";
+  }
+
+  .stream-sticky {
+    position: static;
+  }
+
+  .screen {
+    min-height: 480px;
+    height: clamp(480px, 58vh, 720px);
+  }
+}
+
+/* phone: stream, join, twitter, queue */
+@media (max-width: 760px) {
+  .desk-grid {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "stream"
+      "join"
+      "twitter"
+      "queue";
+  }
+
+  .topbar-bio { display: none; }
+}
+
 @media (max-width: 640px) {
   .nav a { display: none; }
   .screen {
-    min-height: 420px;
-    height: 62vh;
+    min-height: 380px;
+    height: 56vh;
   }
   .stat-stack { grid-template-columns: 1fr 1fr; }
 }
