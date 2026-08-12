@@ -1,6 +1,6 @@
-# STREAM.md — browser remote desktop for play-site arcade
+# STREAM.md - browser remote desktop for play-site arcade
 
-Date: 2026-08-11 (America/New_York)
+Date: 2026-08-12 (America/New_York) - audio side channel added
 Agent desktop under test: DISPLAY=:8 (1280x800 Xvfb)
 
 ## Inventory (what is already on this box)
@@ -13,7 +13,7 @@ Agent desktop under test: DISPLAY=:8 (1280x800 Xvfb)
 | noVNC | Installed (novnc 1.6.0) | /usr/share/novnc (vnc.html, vnc_lite.html). |
 | websockify | Installed + running | Platform :6080 for :1; token mux :6081 via /tmp/sand-novnc-tokens.d (8 -> localhost:5908). |
 | ffmpeg | Installed | HLS fallback possible; worse interactive UX. |
-| pulseaudio | Client libs only | Audio out of scope for v1. |
+| pulseaudio | Installed + running (user) | Null sink `playdesk` on XDG for :8; side-channel MP3 via `/audio/stream.mp3`. |
 | Google Chrome | Installed + running on :8 | Full internet browsing works in-session. |
 | Selkies-GStreamer | Not installed | Heavier than needed for today. |
 | gstreamer CLI | Missing | Blocks easy Selkies path without apt. |
@@ -22,9 +22,9 @@ Platform helpers already wire each forked desktop: box-xvfb + box-x11vnc + token
 
 ## Ranked options (practicality for today)
 
-1. Chosen: noVNC + existing x11vnc — already installed; localhost VNC exists; one websockify gets a browser stream in minutes.
-2. Selkies-GStreamer — better WebRTC for many watchers later; not installed; overkill for prototype.
-3. ffmpeg HLS + custom input injection — high latency; worse arcade UX.
+1. Chosen: noVNC + existing x11vnc - already installed; localhost VNC exists; one websockify gets a browser stream in minutes.
+2. Selkies-GStreamer - better WebRTC for many watchers later; not installed; overkill for prototype.
+3. ffmpeg HLS + custom input injection - high latency; worse arcade UX.
 
 ## Chosen approach (prototype)
 
@@ -73,14 +73,14 @@ Do not start a second x11vnc on :8 unless the platform one dies; the start scrip
 1. Never expose raw VNC unbound on all interfaces without auth. Platform x11vnc correctly uses -localhost. Keep it that way.
 2. Prototype websockify binds 127.0.0.1:6088 only. Safe for local iframe/proxy experiments. Do not rebind to all interfaces for a public arcade.
 3. Platform websockify already listens publicly on :6080 and :6081. Tokens for fork displays are low-entropy (display number). Treat as an infra risk if the box is network-reachable; play-site must not rely on that as public auth.
-4. x11vnc runs -nopw -shared. Any RFB client that reaches it can inject input. noVNC view_only=1 is NOT a server-side security boundary — a crafted websocket client can still send pointer/key events. For production arcade:
+4. x11vnc runs -nopw -shared. Any RFB client that reaches it can inject input. noVNC view_only=1 is NOT a server-side security boundary - a crafted websocket client can still send pointer/key events. For production arcade:
    - Prefer a control gate in the proxy (strip input unless seat token matches now-playing wallet), or
    - Run a view-only VNC (x11vnc -viewonly) for spectators and a separate control channel toggled when the seat is claimed, or
    - Toggle x11vnc input policy from the queue API on seat grant/revoke.
 5. One controller at a time: enforce in play-site (only now-playing wallet receives a short-lived control token). Watchers get view URL only.
 6. Do not leave an open unauthenticated VNC/noVNC on the public internet. Put TLS + auth + seat checks in front (play-site reverse proxy or edge).
 
-## Integration status (play-site UI) — DONE 2026-08-11
+## Integration status (play-site UI) - DONE 2026-08-11
 
 Embedded noVNC in `#stream-screen` via same-origin reverse proxy.
 
@@ -162,11 +162,40 @@ If localhost bridge failed:
 | /usr/share/novnc/ | noVNC static assets |
 | /tmp/sand-novnc-tokens.d/8 | platform token -> localhost:5908 |
 
-## Audio (stub)
+## Audio (side channel) - DONE 2026-08-12
 
-Desktop audio into the browser stream is **not available** with the current stack
-(`x11vnc` + stock `noVNC` + websockify). x11vnc does not tunnel Pulse/PipeWire
-audio over RFB in this setup (only an obsolete ESD path exists), Pulse is
-client-libs only here, and noVNC's "audio" path is the connection bell beep,
-not desktop sound. Enabling real audio would need a separate capture/bridge
-(e.g. Pulse -> WebRTC or a custom mux), which is out of scope for v1.
+noVNC still does not carry desktop sound. Audio is a **separate HTTP side channel**
+on the play-site API origin (same place as `/stream/`), so Netlify can play it via
+`PLAY_API_BASE`.
+
+| Piece | Detail |
+|---|---|
+| Pulse | User daemon, null sink `playdesk` (no `/dev/snd` needed) |
+| Socket | `unix:/tmp/xdg-runtime-box-8/pulse/native` (`XDG_RUNTIME_DIR` for box-chrome on :8) |
+| Client | `/home/box/.config/pulse/client.conf` sets `default-server` (autospawn off) |
+| Capture | `ffmpeg -f pulse -i playdesk.monitor` -> MP3 128k stereo 44.1kHz |
+| URL | `/audio/stream.mp3` (`Content-Type: audio/mpeg`) |
+| Supervise | `server.py` AudioBridge spawns ffmpeg, fans out to clients, restarts on exit |
+| UI | `unmute` / `mute` control under the stream (default muted; browsers block autoplay with sound) |
+
+### Start / verify
+
+```bash
+/workspace/play-site/scripts/start-pulse-playdesk.sh
+# optional relaunch so Chrome picks up the pulse socket via XDG_RUNTIME_DIR
+DISPLAY=:8 /usr/local/bin/box-chrome --start-maximized https://www.google.com
+
+cd /workspace/play-site && python3 server.py   # supervises ffmpeg
+
+curl -sI http://127.0.0.1:8787/audio/stream.mp3 | rg -i 'HTTP|content-type'
+PULSE_SERVER=unix:/tmp/xdg-runtime-box-8/pulse/native pactl list short sinks
+```
+
+Logs: `logs/pulseaudio.log`, `logs/audio-ffmpeg.log`, `logs/pulseaudio.pid`.
+
+### Residual limits
+
+- Autoplay: browsers require a user gesture; the UI stays muted until **unmute**.
+- Latency: HTTP MP3 is typically ~1-3s behind the noVNC video (not lip-sync).
+- Tunnel: Cloudflare/Netlify must not buffer the entire `/audio/` response; it is an infinite live body.
+- Sync: video (RFB) and audio (MP3) are independent clocks; expect drift under load.

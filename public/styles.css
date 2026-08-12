@@ -586,3 +586,26 @@ a.crew-name:hover {
   }
   .stat-stack { grid-template-columns: 1fr 1fr; }
 }
+
+.audio-toggle {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  padding: 0.12rem 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--muted);
+  background: var(--bg-elev);
+  cursor: pointer;
+  line-height: 1.2;
+}
+.audio-toggle:hover {
+  color: var(--text);
+  border-color: rgba(255, 255, 255, 0.22);
+}
+.audio-toggle.on {
+  color: var(--green);
+  border-color: rgba(61, 154, 106, 0.45);
+  background: var(--green-dim);
+}
+#desk-audio { display: none; }

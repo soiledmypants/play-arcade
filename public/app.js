@@ -45,6 +45,8 @@ const els = {
   streamOverlay: $("stream-overlay"),
   streamOverlayTitle: $("stream-overlay-title"),
   streamOverlaySub: $("stream-overlay-sub"),
+  btnAudio: $("btn-audio"),
+  deskAudio: $("desk-audio"),
   crewList: $("crew-list"),
 };
 
@@ -66,6 +68,8 @@ let streamOnline = null;
 let streamCheckBusy = false;
 let streamBlobUrl = null;
 let streamLoadToken = 0;
+let audioWanted = false;
+let audioBound = false;
 
 function shortWallet(addr) {
   if (!addr) return "-";
@@ -380,6 +384,93 @@ function streamAssetBase() {
   return `${streamApiOrigin().origin}/stream`;
 }
 
+
+function audioStreamUrl() {
+  const path = config.stream?.audio?.path || "/audio/stream.mp3";
+  return absolutizePath(path);
+}
+
+function syncAudioButton() {
+  if (!els.btnAudio) return;
+  const on = Boolean(audioWanted);
+  els.btnAudio.textContent = on ? "mute" : "unmute";
+  els.btnAudio.setAttribute("aria-pressed", on ? "true" : "false");
+  els.btnAudio.classList.toggle("on", on);
+  els.btnAudio.title = on
+    ? "mute desktop audio"
+    : "desktop audio starts muted; click to unmute";
+}
+
+function stopDeskAudio() {
+  const a = els.deskAudio;
+  if (!a) return;
+  try {
+    a.pause();
+  } catch {
+    /* ignore */
+  }
+  try {
+    a.removeAttribute("src");
+    a.load();
+  } catch {
+    /* ignore */
+  }
+}
+
+async function startDeskAudio() {
+  const a = els.deskAudio;
+  if (!a) return;
+  const url = audioStreamUrl();
+  // Bust caches / proxies when (re)starting after mute.
+  const next = `${url}${url.includes("?") ? "&" : "?"}t=${Date.now()}`;
+  if (a.getAttribute("src") !== next) {
+    a.src = next;
+  }
+  a.muted = false;
+  a.volume = 1;
+  try {
+    await a.play();
+  } catch (err) {
+    audioWanted = false;
+    syncAudioButton();
+    stopDeskAudio();
+    console.warn("desk audio play blocked", err);
+  }
+}
+
+async function toggleDeskAudio() {
+  audioWanted = !audioWanted;
+  syncAudioButton();
+  if (audioWanted) {
+    if (streamOnline === false) {
+      audioWanted = false;
+      syncAudioButton();
+      return;
+    }
+    await startDeskAudio();
+  } else {
+    stopDeskAudio();
+  }
+}
+
+function bindAudioControls() {
+  if (audioBound) return;
+  audioBound = true;
+  els.btnAudio?.addEventListener("click", () => {
+    toggleDeskAudio();
+  });
+  if (els.deskAudio) {
+    els.deskAudio.addEventListener("error", () => {
+      if (!audioWanted) return;
+      // Retry once shortly; ffmpeg/bridge may be restarting.
+      setTimeout(() => {
+        if (audioWanted) startDeskAudio();
+      }, 1200);
+    });
+  }
+  syncAudioButton();
+}
+
 function revokeStreamBlob() {
   if (streamBlobUrl) {
     URL.revokeObjectURL(streamBlobUrl);
@@ -624,6 +715,10 @@ function desiredStreamMode(state) {
 function showStreamOffline(msg) {
   streamOnline = false;
   streamMode = null;
+  if (audioWanted) {
+    // Keep wanted=true so returning online can resume after unmute gesture already granted.
+    stopDeskAudio();
+  }
   revokeStreamBlob();
   if (els.streamOverlay) {
     els.streamOverlay.hidden = false;
@@ -644,6 +739,9 @@ function showStreamOffline(msg) {
 function showStreamOnline() {
   streamOnline = true;
   if (els.streamOverlay) els.streamOverlay.hidden = true;
+  if (audioWanted && els.deskAudio && els.deskAudio.paused) {
+    startDeskAudio();
+  }
 }
 
 async function probeStream() {
@@ -834,6 +932,7 @@ function bind() {
   els.btnJoin.addEventListener("click", joinQueue);
   els.btnLeave.addEventListener("click", leaveQueue);
   els.btnWallet?.addEventListener("click", toggleWallet);
+  bindAudioControls();
   els.displayName?.addEventListener("change", () => {
     saveName((els.displayName.value || "").trim());
     refreshYouUi();

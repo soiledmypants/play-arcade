@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+import atexit
 import http.client
 import json
 import os
+import queue
 import re
 import select
 import socket
+import subprocess
 import threading
 import time
 import urllib.error
@@ -21,6 +24,7 @@ from urllib.parse import urlparse
 ROOT = Path(__file__).resolve().parent
 PUBLIC = ROOT / "public"
 STATE_FILE = ROOT / "data" / "state.json"
+LOG_DIR = ROOT / "logs"
 
 # ---------------------------------------------------------------------------
 # Config / .env
@@ -93,6 +97,16 @@ STREAM_VIEW_PATH = (
 STREAM_CONTROL_PATH = (
     f"{STREAM_PREFIX}/vnc.html?autoconnect=1&resize=scale&path=stream/"
 )
+
+# Desktop audio side channel (Pulse null-sink -> ffmpeg mp3). Separate from noVNC.
+AUDIO_PREFIX = "/audio"
+AUDIO_STREAM_PATH = f"{AUDIO_PREFIX}/stream.mp3"
+AUDIO_CONTENT_TYPE = "audio/mpeg"
+AUDIO_PULSE_SERVER = os.environ.get(
+    "PULSE_SERVER", "unix:/tmp/xdg-runtime-box-8/pulse/native"
+)
+AUDIO_PULSE_SINK = os.environ.get("PLAY_PULSE_SINK", "playdesk")
+AUDIO_BITRATE = os.environ.get("PLAY_AUDIO_BITRATE", "128k")
 
 CREW = [
     {
@@ -344,6 +358,203 @@ def tick_sessions() -> None:
     _state["updatedAt"] = int(now)
 
 
+
+# ---------------------------------------------------------------------------
+# Desktop audio bridge (Pulse monitor -> ffmpeg mp3 fanout)
+# ---------------------------------------------------------------------------
+
+
+class AudioBridge:
+    """Supervise ffmpeg capturing a Pulse sink monitor; fan out MP3 to HTTP clients."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._clients: list[queue.Queue[bytes | None]] = []
+        self._proc: subprocess.Popen[bytes] | None = None
+        self._stop = False
+        self._thread: threading.Thread | None = None
+        self._started = False
+        self._restarts = 0
+        self._last_error = ""
+
+    @property
+    def running(self) -> bool:
+        proc = self._proc
+        return bool(proc and proc.poll() is None)
+
+    def status(self) -> dict[str, Any]:
+        return {
+            "path": AUDIO_STREAM_PATH,
+            "contentType": AUDIO_CONTENT_TYPE,
+            "codec": "mp3",
+            "bitrate": AUDIO_BITRATE,
+            "pulseServer": AUDIO_PULSE_SERVER,
+            "pulseSink": AUDIO_PULSE_SINK,
+            "running": self.running,
+            "clients": len(self._clients),
+            "restarts": self._restarts,
+            "lastError": self._last_error or None,
+        }
+
+    def start(self) -> None:
+        with self._lock:
+            if self._started:
+                return
+            self._started = True
+            self._stop = False
+            self._thread = threading.Thread(
+                target=self._supervise, name="audio-bridge", daemon=True
+            )
+            self._thread.start()
+
+    def stop(self) -> None:
+        self._stop = True
+        proc = self._proc
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=2)
+            except Exception:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+        with self._lock:
+            for q in list(self._clients):
+                try:
+                    q.put_nowait(None)
+                except Exception:
+                    pass
+            self._clients.clear()
+
+    def subscribe(self) -> queue.Queue[bytes | None]:
+        q: queue.Queue[bytes | None] = queue.Queue(maxsize=64)
+        with self._lock:
+            self._clients.append(q)
+        return q
+
+    def unsubscribe(self, q: queue.Queue[bytes | None]) -> None:
+        with self._lock:
+            if q in self._clients:
+                self._clients.remove(q)
+
+    def _broadcast(self, chunk: bytes) -> None:
+        with self._lock:
+            clients = list(self._clients)
+        dead: list[queue.Queue[bytes | None]] = []
+        for q in clients:
+            try:
+                q.put_nowait(chunk)
+            except queue.Full:
+                # Slow client: drop oldest then retry once; else detach.
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    q.put_nowait(chunk)
+                except queue.Full:
+                    dead.append(q)
+        if dead:
+            with self._lock:
+                for q in dead:
+                    if q in self._clients:
+                        self._clients.remove(q)
+
+    def _spawn(self) -> subprocess.Popen[bytes]:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        log_path = LOG_DIR / "audio-ffmpeg.log"
+        log_f = open(log_path, "a", encoding="utf-8")
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        log_f.write(f"\n--- spawn {stamp} sink={AUDIO_PULSE_SINK} ---\n")
+        log_f.flush()
+        env = os.environ.copy()
+        env["PULSE_SERVER"] = AUDIO_PULSE_SERVER
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            "-f",
+            "pulse",
+            "-i",
+            f"{AUDIO_PULSE_SINK}.monitor",
+            "-ac",
+            "2",
+            "-ar",
+            "44100",
+            "-c:a",
+            "libmp3lame",
+            "-b:a",
+            AUDIO_BITRATE,
+            "-f",
+            "mp3",
+            "-",
+        ]
+        return subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=log_f,
+            env=env,
+            bufsize=0,
+        )
+
+    def _supervise(self) -> None:
+        while not self._stop:
+            proc = None
+            try:
+                proc = self._spawn()
+                self._proc = proc
+                assert proc.stdout is not None
+                while not self._stop:
+                    chunk = proc.stdout.read(4096)
+                    if not chunk:
+                        break
+                    self._broadcast(chunk)
+                rc = proc.poll()
+                if rc is None:
+                    try:
+                        proc.terminate()
+                        proc.wait(timeout=2)
+                    except Exception:
+                        try:
+                            proc.kill()
+                        except OSError:
+                            pass
+                        proc.wait(timeout=1)
+                    rc = proc.poll()
+                if not self._stop:
+                    self._restarts += 1
+                    self._last_error = f"ffmpeg exited rc={rc}"
+                    print(f"[play-site] audio bridge restart: {self._last_error}")
+            except Exception as exc:
+                self._last_error = str(exc)
+                self._restarts += 1
+                print(f"[play-site] audio bridge error: {exc}")
+            finally:
+                self._proc = None
+                if proc is not None:
+                    try:
+                        if proc.stdout:
+                            proc.stdout.close()
+                    except Exception:
+                        pass
+            if self._stop:
+                break
+            time.sleep(1.0)
+
+
+_audio_bridge = AudioBridge()
+
+
+def ensure_audio_bridge() -> AudioBridge:
+    _audio_bridge.start()
+    return _audio_bridge
+
+
 def public_config() -> dict[str, Any]:
     return {
         "sessionSeconds": SESSION_SECONDS,
@@ -370,6 +581,15 @@ def public_config() -> dict[str, Any]:
                 "control requires now-playing ticket "
                 "(view_only is client-side only without a gate)."
             ),
+            "audio": {
+                "path": AUDIO_STREAM_PATH,
+                "contentType": AUDIO_CONTENT_TYPE,
+                "codec": "mp3",
+                "note": (
+                    "desktop audio side channel (not inside noVNC). "
+                    "browsers block autoplay with sound; unmute in the UI."
+                ),
+            },
         },
     }
 
@@ -759,6 +979,50 @@ class Handler(SimpleHTTPRequestHandler):
             return
         self._proxy_stream_http()
 
+    def _audio_headers(self, streaming: bool = True) -> None:
+        self.send_header("Content-Type", AUDIO_CONTENT_TYPE)
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Accept-Ranges", "none")
+        if streaming:
+            # Infinite live body; discourage intermediaries from buffering the whole response.
+            self.send_header("Connection", "close")
+        self._cors()
+
+    def _handle_audio_head(self) -> None:
+        ensure_audio_bridge()
+        self.send_response(200)
+        self._audio_headers(streaming=False)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _handle_audio_stream(self) -> None:
+        bridge = ensure_audio_bridge()
+        self.send_response(200)
+        self._audio_headers(streaming=True)
+        self.end_headers()
+        q = bridge.subscribe()
+        try:
+            while True:
+                try:
+                    chunk = q.get(timeout=60.0)
+                except queue.Empty:
+                    # Keep the connection; encoder may be quiet after a restart.
+                    continue
+                if chunk is None:
+                    break
+                self.wfile.write(chunk)
+                try:
+                    self.wfile.flush()
+                except Exception:
+                    break
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            bridge.unsubscribe(q)
+            self.close_connection = True
+
     def do_OPTIONS(self) -> None:  # noqa: N802
         self.send_response(204)
         self._cors()
@@ -770,7 +1034,20 @@ class Handler(SimpleHTTPRequestHandler):
             self._json(200, public_state())
             return
         if path == "/api/health":
-            self._json(200, {"ok": True, "config": public_config()})
+            cfg = public_config()
+            cfg["stream"] = dict(cfg.get("stream") or {})
+            cfg["stream"]["audioStatus"] = _audio_bridge.status()
+            self._json(200, {"ok": True, "config": cfg})
+            return
+        if path == AUDIO_STREAM_PATH or path == AUDIO_PREFIX or path == AUDIO_PREFIX + "/":
+            # Canonical live stream; trailing slash / bare prefix redirect mentally to stream.mp3
+            if path != AUDIO_STREAM_PATH:
+                self.send_response(302)
+                self.send_header("Location", AUDIO_STREAM_PATH)
+                self._cors()
+                self.end_headers()
+                return
+            self._handle_audio_stream()
             return
         if path == STREAM_PREFIX or path.startswith(STREAM_PREFIX + "/"):
             self._handle_stream_proxy()
@@ -781,6 +1058,9 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_HEAD(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
+        if path == AUDIO_STREAM_PATH or path == AUDIO_PREFIX or path == AUDIO_PREFIX + "/":
+            self._handle_audio_head()
+            return
         if path == STREAM_PREFIX or path.startswith(STREAM_PREFIX + "/"):
             self._proxy_stream_http()
             return
@@ -827,6 +1107,10 @@ def main() -> None:
         tick_sessions()
         save_state()
 
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_audio_bridge()
+    atexit.register(_audio_bridge.stop)
+
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     cfg = public_config()
     print(f"play-site listening on http://0.0.0.0:{PORT}")
@@ -837,11 +1121,16 @@ def main() -> None:
     )
     print(f"  TOKEN_MINT={TOKEN_MINT}")
     print(f"  stream proxy {STREAM_PREFIX}/ -> {STREAM_UPSTREAM} (loopback only)")
+    print(
+        f"  audio {AUDIO_STREAM_PATH} <- pulse:{AUDIO_PULSE_SINK}.monitor "
+        f"({AUDIO_CONTENT_TYPE})"
+    )
     print(f"  static={PUBLIC}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nshutting down")
+        _audio_bridge.stop()
         server.shutdown()
 
 

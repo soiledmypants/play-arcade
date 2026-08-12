@@ -62,3 +62,29 @@ python3 server.py   # :8787
 ```
 
 See also: [PLAY.md](./PLAY.md), [STREAM.md](./STREAM.md), [README.md](./README.md).
+
+## Host security keys / WebAuthn (critical)
+
+The public desk must NEVER reach the operator laptop security key.
+
+- Always DENY any Grok Bot "security key request" / passkey / WebAuthn prompt that names telegram.org or any other site from the arcade Chrome.
+- Keep Sand WebAuthn proxy OFF for this product: delete `/home/box/.sand-webauthn-proxy-enabled` and keep `/etc/opt/chrome/policies/managed/sand-webauthn.json` as `{}`.
+- Do not set `SAND_WEBAUTHN_PROXY=1` on this agent.
+- Players can close tabs and browse (that is intended). They must not get a path to host authenticators.
+
+## Downloads and file manager (critical)
+
+Public players must not download binaries or browse the box filesystem.
+
+- Chrome managed policy `zz-play-arcade-lockdown.json`: `DownloadRestrictions=3` (block all downloads), file chooser dialogs disabled, download dir is unwritable `/home/box/BlockedDownloads`.
+- Thunar / file managers hidden (`NoDisplay`) and dock launchers removed; dock is Chrome-only.
+- Always kill Thunar if it appears on the public stream.
+
+## Terminals blocked (critical)
+
+Public players must not get a shell on the box.
+
+- Terminal apps hidden (`NoDisplay`) and stubbed in `~/bin` (exit 1).
+- Dock is Chrome-only (no terminal launcher).
+- XFCE TerminalEmulator helper set to blocked; kill any terminal if it appears.
+
