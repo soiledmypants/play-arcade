@@ -1,0 +1,13 @@
+{
+  "name": "play-site",
+  "version": "3.0.0",
+  "private": true,
+  "description": "Solana free-play computer arcade — wallet verify + hold-to-rank queue (static + Python stdlib API)",
+  "scripts": {
+    "start": "python3 server.py",
+    "dev": "python3 server.py"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

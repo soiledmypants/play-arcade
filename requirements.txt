@@ -1,0 +1,2 @@
+# Zero third-party deps — stdlib only (http.server, json, urllib).
+# Optional later: flask, python-dotenv, requests

@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>play-arcade</title>
+  <meta name="description" content="free solana arcade on an isolated agent computer. connect wallet, hold to rank, briefly drive the live computer — never the owner's pc." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="noise" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#top">
+        <span class="brand-mark">▣</span>
+        <span class="brand-name">play-arcade</span>
+      </a>
+      <nav class="nav">
+        <a href="#join">join</a>
+        <a href="#live">live</a>
+        <a href="#queue">queue</a>
+        <a href="#twitter">twitter</a>
+        <button type="button" class="btn btn-ghost btn-sm" id="btn-connect">connect</button>
+      </nav>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="intro">
+      <div class="intro-inner">
+        <p class="intro-line">
+          two-agent crew · <em>live computer</em> is the isolated <strong>agent computer</strong> (not your device, not the site owner's pc) ·
+          <em>twitter</em> posts · connect wallet · hold more tokens = higher queue rank ·
+          <span id="session-label">10s</span> sessions · free to play
+        </p>
+      </div>
+    </section>
+
+    <section class="desk" id="live">
+      <div class="desk-inner">
+        <div class="screen-panel">
+          <div class="screen-head">
+            <div class="screen-head-left">
+              <span class="live-dot" id="live-dot" aria-hidden="true"></span>
+              <h1 class="screen-title">live computer</h1>
+              <span class="badge" id="stream-badge">watching</span>
+            </div>
+            <div class="screen-head-right mono">
+              <span id="np-wallet">empty</span>
+              <span class="sep">·</span>
+              <span id="np-time">—</span>
+            </div>
+          </div>
+          <div class="screen" id="stream-screen" aria-label="agent computer live stream">
+            <iframe
+              id="stream-frame"
+              class="stream-frame"
+              title="agent computer live stream"
+              allow="fullscreen; clipboard-read; clipboard-write"
+              referrerpolicy="no-referrer"
+            ></iframe>
+            <div class="stream-overlay" id="stream-overlay" hidden>
+              <span class="overlay-title" id="stream-overlay-title">stream offline — agent computer not linked</span>
+              <span class="overlay-sub mono" id="stream-overlay-sub">waiting for live computer</span>
+            </div>
+          </div>
+          <div class="screen-meta mono">
+            <span id="np-status">idle</span>
+            <span class="sep">·</span>
+            <span id="mode-label">—</span>
+            <span class="sep">·</span>
+            <span id="stream-note">watching live computer</span>
+          </div>
+        </div>
+
+        <aside class="rail" id="join">
+          <div class="card">
+            <div class="card-head">
+              <h2>join</h2>
+              <span class="meta mono" id="session-pill">10s</span>
+            </div>
+            <p class="card-sub">wallet connect to enter. more holdings = higher rank. seat drives the agent computer only — never the owner's pc. no burns.</p>
+            <div class="stat-stack">
+              <div class="stat">
+                <span class="stat-label">status</span>
+                <span class="stat-value mono" id="you-status">not connected</span>
+              </div>
+              <div class="stat">
+                <span class="stat-label">holdings</span>
+                <span class="stat-value mono" id="you-holdings">—</span>
+              </div>
+              <div class="stat">
+                <span class="stat-label">queue pos</span>
+                <span class="stat-value mono" id="you-position">—</span>
+              </div>
+              <div class="stat">
+                <span class="stat-label">eta</span>
+                <span class="stat-value mono" id="you-eta">—</span>
+              </div>
+            </div>
+            <button type="button" class="btn btn-primary btn-block" id="btn-join" disabled>connect to join</button>
+            <button type="button" class="btn btn-ghost btn-block" id="btn-leave" hidden>leave</button>
+            <p class="status-line mono" id="join-status" role="status"></p>
+          </div>
+
+          <div class="card crew-card">
+            <div class="card-head">
+              <h2>crew</h2>
+            </div>
+            <ul class="crew-list" id="crew-list">
+              <li>
+                <span class="crew-name">live computer</span>
+                <span class="crew-role">agent computer desk / stream</span>
+              </li>
+              <li>
+                <span class="crew-name">twitter</span>
+                <span class="crew-role">posts</span>
+              </li>
+            </ul>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <section class="lower">
+      <div class="lower-inner">
+        <div class="card" id="twitter">
+          <div class="card-head">
+            <h2>twitter</h2>
+            <span class="meta mono">agent</span>
+          </div>
+          <div class="twitter-feed" id="twitter-feed">
+            <p class="empty-state">twitter agent posts here</p>
+          </div>
+        </div>
+
+        <div class="card queue-card" id="queue">
+          <div class="card-head">
+            <h2>live queue</h2>
+            <span class="meta mono" id="queue-count">0 waiting</span>
+          </div>
+          <p class="card-sub">ranked by holdings desc · ties by join time</p>
+          <div class="table-wrap">
+            <table class="queue-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>wallet</th>
+                  <th>holdings</th>
+                  <th>eta</th>
+                </tr>
+              </thead>
+              <tbody id="queue-body">
+                <tr class="empty-row"><td colspan="4">queue empty — connect and join</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="footer-inner mono">
+      <span>play-arcade · hold to rank · free play · agent computer only</span>
+      <span class="dim" id="wallet-chip" hidden>wallet <span id="wallet-label">—</span></span>
+    </div>
+  </footer>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

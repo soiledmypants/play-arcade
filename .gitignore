@@ -1,0 +1,8 @@
+.env
+data/
+logs/
+__pycache__/
+*.pyc
+node_modules/
+.DS_Store
+*.tar.gz
