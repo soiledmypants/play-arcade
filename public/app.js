@@ -1,6 +1,9 @@
 const $ = (id) => document.getElementById(id);
 
 const API_BASE = (window.PLAY_API_BASE || "").replace(/\/$/, "");
+const STORAGE_CLIENT = "play-arcade.clientId";
+const STORAGE_NAME = "play-arcade.displayName";
+const TWITTER_URL = "https://x.com/botcomputerxai";
 
 function apiUrl(path) {
   const p = path.startsWith("/") ? path : `/${path}`;
@@ -13,22 +16,20 @@ function absolutizePath(path) {
   return apiUrl(path);
 }
 
-
 const els = {
   sessionLabel: $("session-label"),
   sessionPill: $("session-pill"),
   modeLabel: $("mode-label"),
   youStatus: $("you-status"),
-  youHoldings: $("you-holdings"),
   youPosition: $("you-position"),
   youEta: $("you-eta"),
   btnJoin: $("btn-join"),
   btnLeave: $("btn-leave"),
   joinStatus: $("join-status"),
-  btnConnect: $("btn-connect"),
-  walletChip: $("wallet-chip"),
-  walletLabel: $("wallet-label"),
-  npWallet: $("np-wallet"),
+  displayName: $("display-name"),
+  youChip: $("you-chip"),
+  youLabel: $("you-label"),
+  npName: $("np-name"),
   npTime: $("np-time"),
   npStatus: $("np-status"),
   liveDot: $("live-dot"),
@@ -47,11 +48,11 @@ const els = {
 
 let config = {
   sessionSeconds: 10,
-  demoMode: true,
+  sessionUnlimited: false,
   stream: null,
   crew: null,
 };
-let wallet = null;
+let clientId = null;
 let lastState = null;
 let busy = false;
 /** @type {"view"|"control"|null} */
@@ -59,24 +60,55 @@ let streamMode = null;
 let streamOnline = null;
 let streamCheckBusy = false;
 
-function shortAddr(addr) {
-  if (!addr || addr.length < 10) return addr || "—";
-  return `${addr.slice(0, 4)}…${addr.slice(-4)}`;
+function randomId() {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function ensureClientId() {
+  try {
+    let id = localStorage.getItem(STORAGE_CLIENT);
+    if (!id || !/^[A-Za-z0-9_-]{8,64}$/.test(id)) {
+      id = randomId();
+      localStorage.setItem(STORAGE_CLIENT, id);
+    }
+    return id;
+  } catch {
+    return randomId();
+  }
+}
+
+function defaultGuestName(id) {
+  const suffix = (id || "guest").slice(-4);
+  return `guest-${suffix}`;
+}
+
+function loadSavedName() {
+  try {
+    return (localStorage.getItem(STORAGE_NAME) || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function saveName(name) {
+  try {
+    localStorage.setItem(STORAGE_NAME, name || "");
+  } catch {
+    /* ignore */
+  }
+}
+
+function currentName() {
+  const typed = (els.displayName?.value || "").trim();
+  if (typed) return typed.slice(0, 32);
+  return defaultGuestName(clientId);
 }
 
 function setStatus(msg, kind = "") {
   els.joinStatus.textContent = msg || "";
   els.joinStatus.className = `status-line mono${kind ? " " + kind : ""}`;
-}
-
-function formatHoldings(ui) {
-  const n = Number(ui);
-  if (!Number.isFinite(n)) return "—";
-  if (n === 0) return "0";
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}m`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(2)}k`;
-  if (n >= 1) return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
-  return n.toPrecision(3);
 }
 
 function formatEta(seconds) {
@@ -97,6 +129,7 @@ function formatCountdown(seconds) {
 }
 
 function sessionIsUnlimited() {
+  if (config.sessionUnlimited) return true;
   const n = Number(config.sessionSeconds);
   return !Number.isFinite(n) || n <= 0;
 }
@@ -111,9 +144,29 @@ function sessionPillText() {
   return `${Number(config.sessionSeconds)}s`;
 }
 
-
 function offlineMessage() {
   return config.stream?.offlineMessage || "stream offline — agent computer not linked";
+}
+
+function renderCrew(crew) {
+  if (!els.crewList || !Array.isArray(crew)) return;
+  els.crewList.innerHTML = crew
+    .map((c) => {
+      const id = c.id || "";
+      const name = c.name || id;
+      const role = c.role || "";
+      if (id === "twitter" || /twitter|x\.com/i.test(name + role)) {
+        return `<li>
+          <a class="crew-name" href="${TWITTER_URL}" target="_blank" rel="noopener noreferrer">${name}</a>
+          <span class="crew-role">@botcomputerxai</span>
+        </li>`;
+      }
+      return `<li>
+        <span class="crew-name">${name}</span>
+        <span class="crew-role">${role}</span>
+      </li>`;
+    })
+    .join("");
 }
 
 function applyConfig(cfg) {
@@ -122,104 +175,67 @@ function applyConfig(cfg) {
   if (els.sessionLabel) els.sessionLabel.textContent = sessionLabelText();
   if (els.sessionPill) els.sessionPill.textContent = sessionPillText();
   if (els.modeLabel) {
-    els.modeLabel.textContent = config.demoMode ? "demo mode" : "live";
+    els.modeLabel.textContent = "guest fifo";
   }
   if (els.streamNote && config.stream?.note) {
     els.streamNote.title = config.stream.note;
   }
-  if (Array.isArray(config.crew) && els.crewList) {
-    els.crewList.innerHTML = config.crew
-      .map(
-        (c) => `<li>
-          <span class="crew-name">${c.name || c.id}</span>
-          <span class="crew-role">${c.role || ""}</span>
-        </li>`
-      )
-      .join("");
-  }
-  refreshConnectUi();
-  refreshYouStatus();
+  if (Array.isArray(config.crew)) renderCrew(config.crew);
+  refreshYouUi();
   syncStreamFrame();
 }
 
 function findYou(state) {
-  if (!wallet || !state) return { kind: "absent" };
+  if (!clientId || !state) return { kind: "absent" };
   const np = state.nowPlaying;
-  if (np && np.wallet === wallet) {
+  if (np && np.clientId === clientId) {
     return {
       kind: "playing",
       remainingSeconds: np.remainingSeconds,
-      holdingsUi: np.holdingsUi,
+      name: np.name,
     };
   }
-  const q = (state.queue || []).find((row) => row.wallet === wallet);
+  const q = (state.queue || []).find((row) => row.clientId === clientId);
   if (q) {
     return {
       kind: "queued",
       position: q.position,
       etaSeconds: q.etaSeconds,
-      holdingsUi: q.holdingsUi,
+      name: q.name,
     };
   }
   return { kind: "absent" };
 }
 
-function refreshYouStatus() {
+function refreshYouUi() {
   const you = findYou(lastState);
-  if (!wallet) {
-    els.youStatus.textContent = "not connected";
-    els.youHoldings.textContent = "—";
-    els.youPosition.textContent = "—";
-    els.youEta.textContent = "—";
-    els.btnLeave.hidden = true;
-    return;
-  }
+  const name = currentName();
+  if (els.youLabel) els.youLabel.textContent = name;
   if (you.kind === "playing") {
     els.youStatus.textContent = "now playing";
-    els.youHoldings.textContent = formatHoldings(you.holdingsUi);
     els.youPosition.textContent = "seat";
     els.youEta.textContent = formatCountdown(you.remainingSeconds);
     els.btnLeave.hidden = false;
     els.btnLeave.textContent = "leave seat";
+    els.btnJoin.disabled = busy;
+    els.btnJoin.textContent = "you're playing";
   } else if (you.kind === "queued") {
     els.youStatus.textContent = "in queue";
-    els.youHoldings.textContent = formatHoldings(you.holdingsUi);
     els.youPosition.textContent = `#${you.position}`;
     els.youEta.textContent = formatEta(you.etaSeconds);
     els.btnLeave.hidden = false;
     els.btnLeave.textContent = "leave queue";
+    els.btnJoin.disabled = busy;
+    els.btnJoin.textContent = "already in queue";
   } else {
     els.youStatus.textContent = "ready";
-    els.youHoldings.textContent = "—";
     els.youPosition.textContent = "—";
     els.youEta.textContent = "—";
     els.btnLeave.hidden = true;
+    els.btnJoin.disabled = busy;
+    els.btnJoin.textContent = "join";
   }
-}
-
-function refreshConnectUi() {
-  const connected = Boolean(wallet);
-  const you = findYou(lastState);
   syncStreamFrame();
-  if (connected) {
-    if (els.walletChip) els.walletChip.hidden = false;
-    if (els.walletLabel) els.walletLabel.textContent = shortAddr(wallet);
-    els.btnConnect.textContent = shortAddr(wallet);
-    els.btnJoin.disabled = busy || you.kind === "playing" || you.kind === "queued";
-    if (you.kind === "playing") {
-      els.btnJoin.textContent = "you're playing";
-    } else if (you.kind === "queued") {
-      els.btnJoin.textContent = "already in queue";
-    } else {
-      els.btnJoin.textContent = "join queue";
-    }
-  } else {
-    if (els.walletChip) els.walletChip.hidden = true;
-    els.btnConnect.textContent = "connect";
-    els.btnJoin.disabled = true;
-    els.btnJoin.textContent = "connect to join";
-  }
-  refreshYouStatus();
 }
 
 function streamUrls() {
@@ -240,7 +256,7 @@ function streamUrls() {
 
 function desiredStreamMode(state) {
   const np = state?.nowPlaying;
-  if (wallet && np && np.wallet === wallet) return "control";
+  if (clientId && np && np.clientId === clientId) return "control";
   return "view";
 }
 
@@ -256,7 +272,6 @@ function showStreamOffline(msg) {
     }
   }
   if (els.streamFrame) {
-    // Keep iframe blank so raw json/errors never flash
     if (els.streamFrame.getAttribute("src")) {
       els.streamFrame.removeAttribute("src");
     }
@@ -331,18 +346,20 @@ function renderState(state) {
   else if (state.crew) applyConfig({ crew: state.crew });
 
   const np = state.nowPlaying;
-  const sessionSecs = sessionIsUnlimited() ? null : (Number(config.sessionSeconds) || 15);
+  const sessionSecs = sessionIsUnlimited()
+    ? null
+    : Number(config.sessionSeconds) || 15;
   if (np) {
     els.npStatus.textContent = "live";
     els.liveDot?.classList.add("on");
-    els.npWallet.textContent = np.walletShort || shortAddr(np.wallet);
+    els.npName.textContent = np.name || "player";
     els.npTime.textContent = formatCountdown(
-      sessionIsUnlimited() ? null : (np.remainingSeconds ?? sessionSecs)
+      sessionIsUnlimited() ? null : np.remainingSeconds ?? sessionSecs
     );
   } else {
     els.npStatus.textContent = "idle";
     els.liveDot?.classList.remove("on");
-    els.npWallet.textContent = "empty";
+    els.npName.textContent = "empty";
     els.npTime.textContent = "—";
   }
   syncStreamFrame();
@@ -351,20 +368,19 @@ function renderState(state) {
   els.queueCount.textContent = `${queue.length} waiting`;
   if (!queue.length) {
     els.queueBody.innerHTML =
-      '<tr class="empty-row"><td colspan="4">queue empty — connect and join</td></tr>';
+      '<tr class="empty-row"><td colspan="3">queue empty — join to play</td></tr>';
   } else {
     els.queueBody.innerHTML = queue
       .map(
         (q) => `<tr>
           <td>${q.position}</td>
-          <td title="${q.wallet}">${q.walletShort || shortAddr(q.wallet)}</td>
-          <td>${formatHoldings(q.holdingsUi)}</td>
+          <td title="${q.clientId || ""}">${q.name || "guest"}</td>
           <td>${formatEta(q.etaSeconds)}</td>
         </tr>`
       )
       .join("");
   }
-  refreshConnectUi();
+  refreshYouUi();
 }
 
 async function fetchState() {
@@ -375,45 +391,21 @@ async function fetchState() {
   return data;
 }
 
-function getProvider() {
-  if (typeof window === "undefined") return null;
-  if (window.solana?.isPhantom) return window.solana;
-  if (window.solana) return window.solana;
-  if (window.phantom?.solana?.isPhantom) return window.phantom.solana;
-  return null;
-}
-
-async function connectWallet() {
-  const provider = getProvider();
-  if (!provider) {
-    setStatus("phantom not found — using local demo wallet", "ok");
-    if (!wallet) {
-      wallet = "Demo1111111111111111111111111111111111111";
-      refreshConnectUi();
-    }
-    return;
-  }
-  try {
-    const resp = await provider.connect();
-    wallet = resp.publicKey?.toString?.() || provider.publicKey?.toString?.();
-    if (!wallet) throw new Error("no public key");
-    refreshConnectUi();
-    setStatus("wallet connected", "ok");
-  } catch (err) {
-    setStatus(`connect failed: ${err.message || err}`, "err");
-  }
-}
-
 async function joinQueue() {
-  if (!wallet || busy) return;
+  if (!clientId || busy) return;
   busy = true;
-  refreshConnectUi();
+  refreshYouUi();
+  const name = currentName();
+  saveName(name);
+  if (els.displayName && !els.displayName.value.trim()) {
+    els.displayName.value = name;
+  }
   setStatus("joining queue…");
   try {
     const res = await fetch(apiUrl("/api/queue/join"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ wallet }),
+      body: JSON.stringify({ clientId, name }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "join failed");
@@ -431,20 +423,20 @@ async function joinQueue() {
     setStatus(String(err.message || err), "err");
   } finally {
     busy = false;
-    refreshConnectUi();
+    refreshYouUi();
   }
 }
 
 async function leaveQueue() {
-  if (!wallet || busy) return;
+  if (!clientId || busy) return;
   busy = true;
-  refreshConnectUi();
+  refreshYouUi();
   setStatus("leaving…");
   try {
     const res = await fetch(apiUrl("/api/queue/leave"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ wallet }),
+      body: JSON.stringify({ clientId }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "leave failed");
@@ -455,33 +447,35 @@ async function leaveQueue() {
     setStatus(String(err.message || err), "err");
   } finally {
     busy = false;
-    refreshConnectUi();
+    refreshYouUi();
   }
 }
 
 function bind() {
-  els.btnConnect.addEventListener("click", connectWallet);
   els.btnJoin.addEventListener("click", joinQueue);
   els.btnLeave.addEventListener("click", leaveQueue);
-
-  const provider = getProvider();
-  if (provider) {
-    provider.on?.("accountChanged", (key) => {
-      wallet = key ? key.toString() : null;
-      refreshConnectUi();
-    });
-    provider.on?.("disconnect", () => {
-      wallet = null;
-      refreshConnectUi();
-    });
-    if (provider.isConnected && provider.publicKey) {
-      wallet = provider.publicKey.toString();
-      refreshConnectUi();
+  els.displayName?.addEventListener("change", () => {
+    saveName((els.displayName.value || "").trim());
+    refreshYouUi();
+  });
+  els.displayName?.addEventListener("input", () => {
+    refreshYouUi();
+  });
+  els.displayName?.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      joinQueue();
     }
-  }
+  });
 }
 
 async function boot() {
+  clientId = ensureClientId();
+  const saved = loadSavedName();
+  if (els.displayName) {
+    els.displayName.value = saved || defaultGuestName(clientId);
+    els.displayName.placeholder = defaultGuestName(clientId);
+  }
   applyConfig(config);
   bind();
   showStreamOffline(offlineMessage());

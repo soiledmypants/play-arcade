@@ -1,8 +1,12 @@
 # play-site
 
-Solana free-play arcade: connect a wallet, join a **hold-to-rank** queue, play a short session when your turn comes. No token burns or payments.
+Free-play arcade: enter a guest display name, join a **FIFO** queue, play a short session when your turn comes. No wallet connect.
 
 The live machine is the isolated **agent computer** on this box (`DISPLAY=:8` / VNC `:5908` / noVNC `:6088`) — never the visitor's device and never the site owner's personal PC.
+
+> live grok computer. strangers join a queue and drive this desk.
+
+Follow the desk on X: [x.com/botcomputerxai](https://x.com/botcomputerxai)
 
 ## Docs
 
@@ -42,48 +46,47 @@ Open http://localhost:8787
 |---|---|
 | PORT | 8787 |
 | SESSION_SECONDS | 15 (live); `0` / `UNLIMITED` = no timer (testing) |
-| DEMO_MODE | true |
-| TOKEN_MINT | `8j3Vd…pump` (balance checks only; not shown in UI) |
-| SOLANA_RPC_URL | `https://api.mainnet-beta.solana.com` |
 | STREAM_UPSTREAM | `127.0.0.1:6088` |
 
 Copy `.env.example` to `.env` to customize. Legacy `SESSION_MINUTES` is still read if `SESSION_SECONDS` is unset.
 
 ## Product rules
 
-- Connect Solana wallet (Phantom / `window.solana`) to verify — still free to play
-- **Hold-to-rank queue**: more SPL tokens held (`TOKEN_MINT`) = higher rank; ties by join time
+- Guest identity: random `clientId` in localStorage + optional display name (default `guest-xxxx`)
+- **FIFO queue** by join time (no wallet / holdings ranking)
 - Fixed session length from `SESSION_SECONDS` (live default **15 seconds**; `0` / `UNLIMITED` = no timer for testing)
 - One now-playing controller; everyone else watches the stream
 - Controllable surface = **agent computer** / live computer only
-- Two-agent crew: **live computer** (desk/stream) + **twitter** (posts panel placeholder)
-- Same wallet cannot join twice while already queued or now playing (idempotent)
-- No burns / no payments; CA is not shown in the UI
+- Two-agent crew: **live computer** (desk/stream) + **twitter** ([@botcomputerxai](https://x.com/botcomputerxai))
+- Same clientId cannot join twice while already queued or now playing (idempotent)
 
 ## API
 
 - `GET /api/health` — health + public config (`sessionSeconds`, `crew`, stream paths)
-- `GET /api/state` — `nowPlaying`, `queue` (with `holdingsUi` / `etaSeconds`), `config`, `crew`
-- `POST /api/queue/join` — JSON `{ "wallet" }` — fetches token balance, sorts by holdings
-  - When `DEMO_MODE=true`, optional `{ "holdings": 12345 }` fakes ui amount for testing
-- `POST /api/queue/leave` — JSON `{ "wallet" }`
+- `GET /api/state` — `nowPlaying`, `queue` (with `etaSeconds`), `config`, `crew`
+- `POST /api/queue/join` — JSON `{ "clientId", "name" }`
+- `POST /api/queue/leave` — JSON `{ "clientId" }`
 
-### Curl proof (hold-ranked queue)
+### Curl proof (FIFO queue)
 
 ```bash
-# clear players if needed via leave, then:
+# occupy seat with alice, then bob waits ahead of carol by join time
 curl -s -X POST http://localhost:8787/api/queue/join \
   -H 'Content-Type: application/json' \
-  -d '{"wallet":"WalletLow111111111111111111111111111111111","holdings":10}'
+  -d '{"clientId":"client-alice01","name":"alice"}'
 
 curl -s -X POST http://localhost:8787/api/queue/join \
   -H 'Content-Type: application/json' \
-  -d '{"wallet":"WalletHigh22222222222222222222222222222222","holdings":9999}'
+  -d '{"clientId":"client-bob0002","name":"bob"}'
+
+curl -s -X POST http://localhost:8787/api/queue/join \
+  -H 'Content-Type: application/json' \
+  -d '{"clientId":"client-carol03","name":"carol"}'
 
 curl -s http://localhost:8787/api/state | python3 -m json.tool
 ```
 
-With an idle seat, the first joiner takes it immediately. The second waits; after two joins with an occupied seat, the waiting queue is sorted by holdings desc (high before low).
+With an idle seat, the first joiner takes it immediately. Later joiners wait in FIFO order.
 
 ## Frontend / Netlify
 
@@ -94,16 +97,14 @@ Netlify hosts only the static UI from `public/`. The agent backend (API + `/stre
 
 Static files in `public/`:
 
-
 - Dominant live screen (min ~480px tall), sparse ops-desk styling
 - All visible UI copy lowercase
 - Explicit isolation copy: agent computer / live computer (not visitor device, not owner's pc)
 - Controlling: "you are driving the agent computer — click the screen"
 - Watching: "watching live computer"
 - Calm stream offline message when agent computer is unlinked
-- Holdings, queue position, countdown in seconds (UI shows `no limit (test)` when unlimited)
-- Wallet tip under stream: prefer site iframe embed if Phantom crashes top-level noVNC
-- Twitter panel placeholder (`#twitter`)
+- Display name + queue position + countdown in seconds (UI shows `no limit (test)` when unlimited)
+- Twitter panel → [x.com/botcomputerxai](https://x.com/botcomputerxai)
 
 ## Notes
 
