@@ -481,3 +481,11 @@ a:hover { color: var(--amber); }
   }
   .stat-stack { grid-template-columns: 1fr; }
 }
+
+.stream-tip {
+  margin: 0.4rem 0 0;
+  color: var(--dim);
+  font-size: 0.68rem;
+  line-height: 1.4;
+  max-width: 52rem;
+}

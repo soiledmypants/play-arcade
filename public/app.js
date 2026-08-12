@@ -1,5 +1,19 @@
 const $ = (id) => document.getElementById(id);
 
+const API_BASE = (window.PLAY_API_BASE || "").replace(/\/$/, "");
+
+function apiUrl(path) {
+  const p = path.startsWith("/") ? path : `/${path}`;
+  return `${API_BASE}${p}`;
+}
+
+function absolutizePath(path) {
+  if (!path) return path;
+  if (/^https?:\/\//i.test(path)) return path;
+  return apiUrl(path);
+}
+
+
 const els = {
   sessionLabel: $("session-label"),
   sessionPill: $("session-pill"),
@@ -27,6 +41,7 @@ const els = {
   streamOverlay: $("stream-overlay"),
   streamOverlayTitle: $("stream-overlay-title"),
   streamOverlaySub: $("stream-overlay-sub"),
+  streamTip: $("stream-tip"),
   crewList: $("crew-list"),
 };
 
@@ -65,6 +80,8 @@ function formatHoldings(ui) {
 }
 
 function formatEta(seconds) {
+  if (sessionIsUnlimited()) return "—";
+  if (seconds == null || !Number.isFinite(Number(seconds))) return "—";
   const s = Math.max(0, Math.floor(Number(seconds) || 0));
   if (s === 0) return "~now";
   if (s < 60) return `~${s}s`;
@@ -74,9 +91,26 @@ function formatEta(seconds) {
 }
 
 function formatCountdown(seconds) {
+  if (sessionIsUnlimited() || seconds == null || Number(seconds) < 0) return "∞";
   const s = Math.max(0, Math.floor(Number(seconds) || 0));
   return `${s}s`;
 }
+
+function sessionIsUnlimited() {
+  const n = Number(config.sessionSeconds);
+  return !Number.isFinite(n) || n <= 0;
+}
+
+function sessionLabelText() {
+  if (sessionIsUnlimited()) return "no limit (test)";
+  return `${Number(config.sessionSeconds)}s sessions`;
+}
+
+function sessionPillText() {
+  if (sessionIsUnlimited()) return "no limit (test)";
+  return `${Number(config.sessionSeconds)}s`;
+}
+
 
 function offlineMessage() {
   return config.stream?.offlineMessage || "stream offline — agent computer not linked";
@@ -85,9 +119,8 @@ function offlineMessage() {
 function applyConfig(cfg) {
   if (!cfg) return;
   config = { ...config, ...cfg };
-  const secs = Number(config.sessionSeconds) || 10;
-  if (els.sessionLabel) els.sessionLabel.textContent = `${secs}s`;
-  if (els.sessionPill) els.sessionPill.textContent = `${secs}s`;
+  if (els.sessionLabel) els.sessionLabel.textContent = sessionLabelText();
+  if (els.sessionPill) els.sessionPill.textContent = sessionPillText();
   if (els.modeLabel) {
     els.modeLabel.textContent = config.demoMode ? "demo mode" : "live";
   }
@@ -191,14 +224,17 @@ function refreshConnectUi() {
 
 function streamUrls() {
   const s = config.stream || {};
-  const view =
+  let view =
     s.viewPath ||
     s.viewUrl ||
     "/stream/vnc.html?autoconnect=1&resize=scale&view_only=1&path=stream/";
-  const control =
+  let control =
     s.controlPath ||
     s.controlUrl ||
     "/stream/vnc.html?autoconnect=1&resize=scale&path=stream/";
+  // relative paths from config.stream must hit the agent backend, not Netlify
+  view = absolutizePath(view);
+  control = absolutizePath(control);
   return { view, control };
 }
 
@@ -238,7 +274,7 @@ async function probeStream() {
   try {
     const controller = new AbortController();
     const t = setTimeout(() => controller.abort(), 2500);
-    const res = await fetch("/stream/vnc.html", {
+    const res = await fetch(apiUrl("/stream/vnc.html"), {
       method: "HEAD",
       cache: "no-store",
       signal: controller.signal,
@@ -295,12 +331,14 @@ function renderState(state) {
   else if (state.crew) applyConfig({ crew: state.crew });
 
   const np = state.nowPlaying;
-  const sessionSecs = Number(config.sessionSeconds) || 10;
+  const sessionSecs = sessionIsUnlimited() ? null : (Number(config.sessionSeconds) || 15);
   if (np) {
     els.npStatus.textContent = "live";
     els.liveDot?.classList.add("on");
     els.npWallet.textContent = np.walletShort || shortAddr(np.wallet);
-    els.npTime.textContent = formatCountdown(np.remainingSeconds ?? sessionSecs);
+    els.npTime.textContent = formatCountdown(
+      sessionIsUnlimited() ? null : (np.remainingSeconds ?? sessionSecs)
+    );
   } else {
     els.npStatus.textContent = "idle";
     els.liveDot?.classList.remove("on");
@@ -330,7 +368,7 @@ function renderState(state) {
 }
 
 async function fetchState() {
-  const res = await fetch("/api/state", { cache: "no-store" });
+  const res = await fetch(apiUrl("/api/state"), { cache: "no-store" });
   if (!res.ok) throw new Error(`state ${res.status}`);
   const data = await res.json();
   renderState(data);
@@ -372,7 +410,7 @@ async function joinQueue() {
   refreshConnectUi();
   setStatus("joining queue…");
   try {
-    const res = await fetch("/api/queue/join", {
+    const res = await fetch(apiUrl("/api/queue/join"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ wallet }),
@@ -403,7 +441,7 @@ async function leaveQueue() {
   refreshConnectUi();
   setStatus("leaving…");
   try {
-    const res = await fetch("/api/queue/leave", {
+    const res = await fetch(apiUrl("/api/queue/leave"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ wallet }),

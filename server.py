@@ -45,12 +45,18 @@ load_dotenv(ROOT / ".env")
 PORT = int(os.environ.get("PORT", "8787"))
 
 # Prefer SESSION_SECONDS; migrate legacy SESSION_MINUTES if needed.
-if os.environ.get("SESSION_SECONDS"):
-    SESSION_SECONDS = max(1, int(os.environ["SESSION_SECONDS"]))
+# 0 / negative / "UNLIMITED" = no timer expiry (testing). Live target is 15.
+_raw_session = (os.environ.get("SESSION_SECONDS") or "").strip()
+if _raw_session.upper() == "UNLIMITED":
+    SESSION_SECONDS = 0
+elif _raw_session != "":
+    SESSION_SECONDS = max(0, int(_raw_session))
 elif os.environ.get("SESSION_MINUTES"):
-    SESSION_SECONDS = max(1, int(os.environ["SESSION_MINUTES"]) * 60)
+    SESSION_SECONDS = max(0, int(os.environ["SESSION_MINUTES"]) * 60)
 else:
-    SESSION_SECONDS = 10
+    SESSION_SECONDS = 15
+
+SESSION_UNLIMITED = SESSION_SECONDS <= 0
 
 DEMO_MODE = os.environ.get("DEMO_MODE", "true").lower() in ("1", "true", "yes", "on")
 TOKEN_MINT = os.environ.get("TOKEN_MINT") or "8j3VdEjQW1Wch6nQHueVu9A1DeihKXiq3qS6eSPWpump"
@@ -314,24 +320,35 @@ def refresh_queue_holdings(force: bool = False) -> None:
 
 
 def tick_sessions() -> None:
-    """Advance session clock; promote next player when seat is free/expired."""
+    """Advance session clock; promote next player when seat is free/expired.
+
+    SESSION_SECONDS=0 means unlimited (testing): seat never auto-expires.
+    """
     now = time.time()
     np = _state.get("nowPlaying")
     if np:
+        unlimited = SESSION_UNLIMITED or int(np.get("seconds") or 0) == 0
         ends_at = float(np.get("endsAt") or 0)
-        if ends_at <= now:
+        if unlimited:
+            np["seconds"] = 0
+            np["endsAt"] = 0
+            np["remainingSeconds"] = None
+            np["unlimited"] = True
+        elif ends_at <= now:
             _state["nowPlaying"] = None
             np = None
         else:
             remaining = max(0, int(ends_at - now))
             np["remainingSeconds"] = remaining
+            np["unlimited"] = False
 
     sort_queue()
 
     if np is None and _state["queue"]:
         nxt = _state["queue"].pop(0)
         seconds = SESSION_SECONDS
-        ends = now + seconds
+        unlimited = SESSION_UNLIMITED or seconds == 0
+        ends = 0 if unlimited else (now + seconds)
         holdings = _entry_holdings(nxt)
         _state["nowPlaying"] = {
             "wallet": nxt["wallet"],
@@ -339,7 +356,8 @@ def tick_sessions() -> None:
             "seconds": seconds,
             "startedAt": now,
             "endsAt": ends,
-            "remainingSeconds": seconds,
+            "remainingSeconds": None if unlimited else seconds,
+            "unlimited": unlimited,
             "joinedAt": nxt.get("joinedAt"),
             "holdingsRaw": holdings["holdingsRaw"],
             "holdingsUi": holdings["holdingsUi"],
@@ -351,6 +369,7 @@ def tick_sessions() -> None:
 def public_config() -> dict[str, Any]:
     return {
         "sessionSeconds": SESSION_SECONDS,
+        "sessionUnlimited": SESSION_UNLIMITED,
         "demoMode": DEMO_MODE,
         "tokenMint": TOKEN_MINT,
         "port": PORT,
@@ -379,10 +398,13 @@ def _build_public_queue(np: dict[str, Any] | None) -> list[dict[str, Any]]:
     session = SESSION_SECONDS
     queue = []
     for i, q in enumerate(_state["queue"]):
-        eta_seconds = i * session
-        if np:
-            rem = max(0, int(np.get("remainingSeconds") or 0))
-            eta_seconds = rem + i * session
+        if SESSION_UNLIMITED:
+            eta_seconds = None if np else 0
+        else:
+            eta_seconds = i * session
+            if np:
+                rem = max(0, int(np.get("remainingSeconds") or 0))
+                eta_seconds = rem + i * session
         holdings = _entry_holdings(q)
         queue.append(
             {
@@ -568,8 +590,9 @@ class Handler(SimpleHTTPRequestHandler):
         print(f"[play-site] {self.address_string()} {fmt % args}")
 
     def _cors(self) -> None:
+        # Allow Netlify (and any) static origin to call the agent API + stream probe.
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, HEAD, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
     def _json(self, code: int, payload: Any) -> None:
@@ -645,6 +668,7 @@ class Handler(SimpleHTTPRequestHandler):
             else:
                 self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            self._cors()
             self.end_headers()
             if self.command != "HEAD" and body:
                 self.wfile.write(body)

@@ -29,7 +29,8 @@ Open http://localhost:8787
 
 ## Safe public deploy
 
-- **Frontend** can be public (static + queue API).
+- **Frontend** can be public static on Netlify (`public/` + `PLAY_API_BASE` → agent tunnel).
+- **Queue/API + stream proxy** stay on the agent host (tunnel), not on Netlify.
 - **Stream gateway stays on the agent host only**: VNC/noVNC remain loopback (`127.0.0.1:5908` / `127.0.0.1:6088`); public viewers reach them only through an authenticated TLS tunnel/proxy that reverse-proxies `/stream/`.
 - Control requires a **now-playing** ticket; default embed is `view_only`.
 - Do not publish raw VNC/noVNC ports. Do not mount or document control of the owner's personal PC.
@@ -40,7 +41,7 @@ Open http://localhost:8787
 | Var | Default |
 |---|---|
 | PORT | 8787 |
-| SESSION_SECONDS | 10 |
+| SESSION_SECONDS | 15 (live); `0` / `UNLIMITED` = no timer (testing) |
 | DEMO_MODE | true |
 | TOKEN_MINT | `8j3Vd…pump` (balance checks only; not shown in UI) |
 | SOLANA_RPC_URL | `https://api.mainnet-beta.solana.com` |
@@ -52,7 +53,7 @@ Copy `.env.example` to `.env` to customize. Legacy `SESSION_MINUTES` is still re
 
 - Connect Solana wallet (Phantom / `window.solana`) to verify — still free to play
 - **Hold-to-rank queue**: more SPL tokens held (`TOKEN_MINT`) = higher rank; ties by join time
-- Fixed session length from `SESSION_SECONDS` (default **10 seconds**)
+- Fixed session length from `SESSION_SECONDS` (live default **15 seconds**; `0` / `UNLIMITED` = no timer for testing)
 - One now-playing controller; everyone else watches the stream
 - Controllable surface = **agent computer** / live computer only
 - Two-agent crew: **live computer** (desk/stream) + **twitter** (posts panel placeholder)
@@ -84,9 +85,15 @@ curl -s http://localhost:8787/api/state | python3 -m json.tool
 
 With an idle seat, the first joiner takes it immediately. The second waits; after two joins with an occupied seat, the waiting queue is sorted by holdings desc (high before low).
 
-## Frontend
+## Frontend / Netlify
+
+Netlify hosts only the static UI from `public/`. The agent backend (API + `/stream/` proxy) runs on this box and is reached via a Cloudflare quick tunnel (or custom origin).
+
+1. Set `window.PLAY_API_BASE` in `public/config.js` to the agent tunnel origin (empty = same origin, for local `python3 server.py`).
+2. Deploy/publish `public/` on Netlify — do not expect `/api/*` on Netlify itself.
 
 Static files in `public/`:
+
 
 - Dominant live screen (min ~480px tall), sparse ops-desk styling
 - All visible UI copy lowercase
@@ -94,7 +101,8 @@ Static files in `public/`:
 - Controlling: "you are driving the agent computer — click the screen"
 - Watching: "watching live computer"
 - Calm stream offline message when agent computer is unlinked
-- Holdings, queue position, countdown in seconds
+- Holdings, queue position, countdown in seconds (UI shows `no limit (test)` when unlimited)
+- Wallet tip under stream: prefer site iframe embed if Phantom crashes top-level noVNC
 - Twitter panel placeholder (`#twitter`)
 
 ## Notes
