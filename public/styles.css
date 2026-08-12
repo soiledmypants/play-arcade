@@ -16,11 +16,11 @@
   --red-dim: rgba(196, 92, 92, 0.12);
   --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --sans: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
-  --max: 1480px;
+  --max: 1680px;
   --radius: 6px;
   --topbar-h: 52px;
-  --rail-w: 280px;
-  --rail-w-right: 260px;
+  --rail-w: 240px;
+  --rail-w-right: 220px;
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -173,7 +173,7 @@ a:hover { color: var(--amber); }
   max-width: var(--max);
   margin: 0 auto;
   display: grid;
-  grid-template-columns: minmax(240px, var(--rail-w)) minmax(0, 1fr) minmax(220px, var(--rail-w-right));
+  grid-template-columns: minmax(200px, var(--rail-w)) minmax(0, 1.6fr) minmax(180px, var(--rail-w-right));
   grid-template-areas:
     "join stream twitter"
     "queue queue queue";
@@ -263,8 +263,8 @@ a:hover { color: var(--amber); }
 .screen {
   position: relative;
   width: 100%;
-  min-height: 520px;
-  height: clamp(520px, 72vh, 860px);
+  min-height: 680px;
+  height: clamp(680px, 86vh, 1200px);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: #050506;
@@ -554,8 +554,7 @@ a.crew-name:hover {
     position: static;
   }
 
-  .screen {
-    min-height: 480px;
+      min-height: 560px;
     height: clamp(480px, 58vh, 720px);
   }
 }
@@ -576,8 +575,7 @@ a.crew-name:hover {
 
 @media (max-width: 640px) {
   .nav a { display: none; }
-  .screen {
-    min-height: 380px;
+      min-height: 420px;
     height: 56vh;
   }
   .stat-stack { grid-template-columns: 1fr 1fr; }
