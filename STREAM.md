@@ -161,3 +161,12 @@ If localhost bridge failed:
 | /workspace/play-site/logs/novnc-6088.pid | pid file |
 | /usr/share/novnc/ | noVNC static assets |
 | /tmp/sand-novnc-tokens.d/8 | platform token -> localhost:5908 |
+
+## Audio (stub)
+
+Desktop audio into the browser stream is **not available** with the current stack
+(`x11vnc` + stock `noVNC` + websockify). x11vnc does not tunnel Pulse/PipeWire
+audio over RFB in this setup (only an obsolete ESD path exists), Pulse is
+client-libs only here, and noVNC's "audio" path is the connection bell beep,
+not desktop sound. Enabling real audio would need a separate capture/bridge
+(e.g. Pulse -> WebRTC or a custom mux), which is out of scope for v1.

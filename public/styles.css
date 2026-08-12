@@ -264,11 +264,13 @@ a:hover { color: var(--amber); }
   position: relative;
   width: 100%;
   min-height: 680px;
-  height: clamp(680px, 86vh, 1200px);
+  height: clamp(680px, 84vh, 1100px);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: #050506;
   overflow: hidden;
+  overscroll-behavior: none;
+  touch-action: none;
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.02);
 }
 
@@ -280,6 +282,8 @@ a:hover { color: var(--amber); }
   border: 0;
   background: #000;
   z-index: 1;
+  pointer-events: auto;
+  overflow: hidden;
 }
 
 .stream-overlay {
@@ -554,8 +558,9 @@ a.crew-name:hover {
     position: static;
   }
 
-      min-height: 560px;
-    height: clamp(480px, 58vh, 720px);
+  .screen {
+    min-height: 560px;
+    height: clamp(560px, 72vh, 900px);
   }
 }
 
@@ -575,8 +580,9 @@ a.crew-name:hover {
 
 @media (max-width: 640px) {
   .nav a { display: none; }
-      min-height: 420px;
-    height: 56vh;
+  .screen {
+    min-height: 420px;
+    height: 64vh;
   }
   .stat-stack { grid-template-columns: 1fr 1fr; }
 }

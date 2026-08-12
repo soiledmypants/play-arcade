@@ -394,7 +394,9 @@ function buildStreamParams(mode) {
   const params = new URLSearchParams();
   params.set("autoconnect", "1");
   params.set("reconnect", "1");
-  params.set("resize", "scale");
+  params.set("resize", "remote");
+  params.set("show_dot", "0");
+  params.set("view_clip", "0");
   params.set("host", origin.hostname);
   params.set("port", String(port));
   params.set("path", "stream/");
@@ -458,18 +460,128 @@ function injectStreamConnectSettings(html, mode) {
         defaults['encrypt'] = ${isHttps ? "true" : "false"};
         defaults['autoconnect'] = true;
         defaults['reconnect'] = true;
-        defaults['resize'] = 'scale';
+        defaults['resize'] = 'remote';
+        defaults['show_dot'] = false;
+        defaults['view_clip'] = false;
         defaults['view_only'] = ${viewOnly ? "true" : "false"};
         mandatory['host'] = defaults['host'];
         mandatory['port'] = defaults['port'];
         mandatory['path'] = defaults['path'];
         mandatory['encrypt'] = defaults['encrypt'];
+        mandatory['resize'] = defaults['resize'];
+        mandatory['show_dot'] = defaults['show_dot'];
+        mandatory['view_clip'] = defaults['view_clip'];
         mandatory['view_only'] = defaults['view_only'];
 `;
   if (html.includes("UI.start(")) {
     html = html.replace("UI.start(", `${inject}\n        UI.start(`);
   }
+  html = injectStreamViewLock(html);
   return html;
+}
+
+/** Hide noVNC chrome and clip canvas so the remote fills the iframe. */
+function injectStreamViewLock(html) {
+  const lock = `
+    <style id="play-stream-lock">
+      html, body {
+        margin: 0 !important;
+        padding: 0 !important;
+        overflow: hidden !important;
+        width: 100% !important;
+        height: 100% !important;
+        background: #000 !important;
+        overscroll-behavior: none !important;
+        touch-action: none !important;
+      }
+      #noVNC_control_bar,
+      #noVNC_control_bar_anchor,
+      #noVNC_control_bar_handle,
+      #noVNC_control_bar_hint,
+      #noVNC_status,
+      #noVNC_power_button,
+      #noVNC_clipboard_button,
+      #noVNC_settings_button,
+      #noVNC_fullscreen_button,
+      #noVNC_extra_keys_button,
+      #noVNC_view_drag_button,
+      #noVNC_mobile_buttons,
+      #noVNC_modifiers,
+      #noVNC_connect_button,
+      #noVNC_disconnect_button,
+      .noVNC_panel,
+      #noVNC_credentials_dlg {
+        display: none !important;
+        visibility: hidden !important;
+        pointer-events: none !important;
+      }
+      #noVNC_container,
+      #noVNC_screen,
+      #noVNC_canvas_area {
+        margin: 0 !important;
+        padding: 0 !important;
+        overflow: hidden !important;
+        width: 100% !important;
+        height: 100% !important;
+        max-width: 100% !important;
+        max-height: 100% !important;
+        border: 0 !important;
+        background: #000 !important;
+      }
+      #noVNC_container canvas,
+      #noVNC_screen canvas,
+      canvas {
+        display: block !important;
+        margin: 0 !important;
+        width: 100% !important;
+        height: 100% !important;
+        max-width: none !important;
+        max-height: none !important;
+        object-fit: fill !important;
+      }
+      #noVNC_transition,
+      #noVNC_transition_text,
+      #noVNC_bell,
+      #noVNC_fallback_error {
+        display: none !important;
+        visibility: hidden !important;
+      }
+    </style>
+    <script id="play-stream-lock-js">
+      (function () {
+        function harden() {
+          try {
+            document.documentElement.style.overflow = "hidden";
+            if (document.body) document.body.style.overflow = "hidden";
+            ["noVNC_control_bar","noVNC_control_bar_anchor","noVNC_status",
+             "noVNC_control_bar_hint","noVNC_power_button","noVNC_clipboard_button",
+             "noVNC_settings_button","noVNC_view_drag_button"].forEach(function (id) {
+              var el = document.getElementById(id);
+              if (el) { el.style.display = "none"; el.hidden = true; }
+            });
+          } catch (e) {}
+        }
+        function blockParentScroll(ev) {
+          if (ev.cancelable && (ev.type === "wheel" || ev.type === "touchmove")) {
+            ev.preventDefault();
+          }
+        }
+        ["wheel","touchmove"].forEach(function (type) {
+          window.addEventListener(type, blockParentScroll, { passive: false, capture: true });
+        });
+        if (document.readyState === "loading") {
+          document.addEventListener("DOMContentLoaded", harden);
+        } else {
+          harden();
+        }
+        setInterval(harden, 1500);
+      })();
+    </script>
+`;
+  if (/<head[^>]*>/i.test(html)) {
+    return html.replace(/<head[^>]*>/i, (m) => m + lock);
+  }
+  return lock + html;
 }
 
 async function loadStreamFrame(mode) {
