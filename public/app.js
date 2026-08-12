@@ -394,7 +394,7 @@ function buildStreamParams(mode) {
   const params = new URLSearchParams();
   params.set("autoconnect", "1");
   params.set("reconnect", "1");
-  params.set("resize", "remote");
+  params.set("resize", "scale");
   params.set("show_dot", "0");
   params.set("view_clip", "0");
   params.set("host", origin.hostname);
@@ -460,7 +460,7 @@ function injectStreamConnectSettings(html, mode) {
         defaults['encrypt'] = ${isHttps ? "true" : "false"};
         defaults['autoconnect'] = true;
         defaults['reconnect'] = true;
-        defaults['resize'] = 'remote';
+        defaults['resize'] = 'scale';
         defaults['show_dot'] = false;
         defaults['view_clip'] = false;
         defaults['view_only'] = ${viewOnly ? "true" : "false"};
@@ -480,7 +480,7 @@ function injectStreamConnectSettings(html, mode) {
   return html;
 }
 
-/** Hide noVNC chrome and clip canvas so the remote fills the iframe. */
+/** Hide noVNC chrome; keep black letterbox bars (scale, no stretch). */
 function injectStreamViewLock(html) {
   const lock = `
     <style id="play-stream-lock">
@@ -532,12 +532,11 @@ function injectStreamViewLock(html) {
       #noVNC_screen canvas,
       canvas {
         display: block !important;
-        margin: 0 !important;
-        width: 100% !important;
-        height: 100% !important;
-        max-width: none !important;
-        max-height: none !important;
-        object-fit: fill !important;
+        margin: 0 auto !important;
+        /* let noVNC scale mode size the canvas; do not stretch */
+        max-width: 100% !important;
+        max-height: 100% !important;
+        object-fit: contain !important;
       }
       #noVNC_transition,
       #noVNC_transition_text,
